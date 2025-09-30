@@ -1,0 +1,135 @@
+Virtual Shelly Pro 3EM (Home Assistant–backed)
+
+Overview
+
+- Emulates a Shelly Pro 3EM device. It polls power/voltage/current/PF values from Home Assistant (HA) and exposes Shelly-like RPC over HTTP, WebSocket, and UDP, with mDNS discovery and simple energy integration/persistence.
+- Useful for gateways/apps that expect a Shelly 3‑phase power meter on the LAN (e.g., Shelly app, b2500 integrations, custom dashboards).
+
+Features
+
+- HTTP API (FastAPI + Uvicorn) with:
+  - GET `/shelly`: Gen2 device info (id, app, ver, model, gen, mac, sn, auth flags).
+  - POST `/rpc`: JSON‑RPC 2.0 envelope for Shelly.* and EM*/EMData* methods.
+  - GET `/rpc?method=...` and GET `/rpc/{method}`: returns the method result directly (no envelope), matching Shelly GET semantics.
+  - GET `/healthz` and GET `/`: simple health and info.
+- WebSockets:
+  - WS `/rpc`: JSON‑RPC over WebSocket (common for Shelly Gen2).
+  - Fan‑out WS servers on TCP ports 6010–6022 echoing RPC responses (configurable).
+- UDP RPC (Shelly‑style, compatible with tomquist/b2500‑meter):
+  - Supports `EM.GetStatus` (3‑phase) and `EM1.GetStatus` (single total) with identical rounding/decimal behavior.
+  - Listens on configurable UDP ports (defaults include 1010 and 2220).
+- mDNS service advertisements (`_http._tcp` and `_shelly._tcp`) for discovery.
+- Energy counters integrated from power over time and persisted at `/data/state.json` (via Docker volume).
+
+Quick Start (Docker Compose)
+
+1) Adjust `docker-compose.yaml` environment to match your HA URL, token, and entity IDs.
+2) Ensure your host can use host networking (recommended for UDP + mDNS).
+3) Bring it up:
+   - `docker compose up -d`
+4) Verify:
+   - `curl http://<device-ip>/shelly`
+   - `curl "http://<device-ip>/rpc/EM.GetStatus?id=0"`
+   - `curl http://<device-ip>/healthz`
+
+Manual Run (no Docker)
+
+- Python 3.11+
+- `pip install -r requirements.txt`
+- `uvicorn app:app --host 0.0.0.0 --port 80`
+
+Configuration (env vars)
+
+- Home Assistant
+  - `HA_BASE_URL`: e.g. `http://homeassistant:8123` or `http://192.168.x.x:8123`
+  - `HA_TOKEN`: HA Long‑Lived Access Token (read‑only)
+  - `POLL_INTERVAL`: seconds between polls (default 2.0)
+  - Entity IDs (override as needed): `A_POWER`, `B_POWER`, `C_POWER`, `A_VOLT`, `B_VOLT`, `C_VOLT`, `A_CURR`, `B_CURR`, `C_CURR`, `A_PF`, `B_PF`, `C_PF`
+- Device identity
+  - `DEVICE_ID`, `MODEL` (default `ShellyPro3EM`), `FIRMWARE`, `MAC`, `SN`, `MANUFACTURER`
+- HTTP/WebSocket
+  - `HTTP_PORT`: used in mDNS TXT/adverts only. Uvicorn listens on port 80 by default in the container.
+  - `WS_PORT_START`, `WS_PORT_END`: WS fan‑out TCP range (default 6010–6022)
+- UDP RPC
+  - `UDP_PORTS`: comma‑separated list (e.g. `1010,2220`) for old/new Shelly Pro 3EM styles
+  - `UDP_MAX`: max UDP payload size (bytes)
+- mDNS
+  - `MDNS_ENABLE`: `true|false`
+  - `MDNS_HOSTNAME`: instance name (defaults to `DEVICE_ID`)
+  - `MDNS_IP`: optional explicit IP to advertise (helps with multi‑homed hosts)
+- Payload shape
+  - `STRICT_MINIMAL_PAYLOAD`: when `true`, HTTP/WS `EM.GetStatus` returns only `{a_act_power,b_act_power,c_act_power,total_act_power}` (some gateways prefer this).
+- Persistence
+  - `STATE_PATH`: defaults to `/data/state.json` (mounted via volume in Compose).
+
+APIs
+
+- HTTP JSON‑RPC (POST `/rpc`): send a JSON‑RPC 2.0 request, e.g.
+  - `{ "id": 1, "method": "EM.GetStatus", "params": {"id": 0} }`
+- HTTP GET RPC:
+  - `/rpc?method=EM.GetStatus&id=0`
+  - `/rpc/EM.GetStatus?id=0`
+  - Response is the method result object, e.g. `{ "a_act_power": 123.4, ... }`
+- WebSocket RPC:
+  - Connect `ws://<ip>/rpc` and send the same JSON‑RPC envelopes as POST `/rpc`.
+- Shelly‑style UDP RPC (b2500 compatible):
+  - Send to UDP port `1010` or `2220` (configurable via `UDP_PORTS`)
+  - Request (example): `{"id":1,"src":"cli","method":"EM.GetStatus","params":{"id":0}}`
+  - Response (example): `{"id":1,"src":"<DEVICE_ID>","dst":"unknown","result":{"a_act_power":X.X,"b_act_power":Y.Y,"c_act_power":Z.Z,"total_act_power":T.TTT}}`
+  - Also supports `EM1.GetStatus` -> `{ "result": { "act_power": T.TTT } }`
+
+Example Commands
+
+- HTTP GET:
+  - `curl http://<ip>/shelly`
+  - `curl "http://<ip>/rpc/EM.GetStatus?id=0"`
+- HTTP POST JSON‑RPC:
+  - `curl -s http://<ip>/rpc -H 'Content-Type: application/json' -d '{"id":1,"method":"EM.GetStatus","params":{"id":0}}'`
+- WebSocket JSON‑RPC (using websocat):
+  - `websocat ws://<ip>/rpc`
+  - Then send: `{"id":1,"method":"EM.GetStatus","params":{"id":0}}`
+- UDP (netcat):
+  - `echo -n '{"id":1,"src":"cli","method":"EM.GetStatus","params":{"id":0}}' | nc -u -w1 <ip> 2220`
+
+Home Assistant polling
+
+- Each `POLL_INTERVAL`, HA sensors are fetched. Missing or `unknown/unavailable` values are treated as `None` (or `0.0` for power). Phase power values feed energy integration (kWh) over time.
+- Energy counters persist to `STATE_PATH`. You can reset counters via RPC: `EMData.ResetCounters`.
+
+Shelly app notes
+
+- Use host networking in Docker for best compatibility with mDNS/UDP. Ensure the phone and host are on the same subnet/VLAN.
+- If discovery fails:
+  - Try adding by IP in the app.
+  - Set `MDNS_IP` to the actual LAN IP and restart.
+  - Ensure firewall allows UDP 5353 (mDNS) and the chosen UDP RPC ports (e.g., 1010/2220).
+  - Keep HTTP on port 80 (default in image) as some apps assume it.
+
+Troubleshooting
+
+- Check health: `curl http://<ip>/healthz`
+- Inspect logs: `docker logs -f shelly3em-virtual`
+- Verify endpoints hit by the app (look for GET /shelly, /rpc calls, WS /rpc handshakes).
+- Confirm UDP replies with netcat; try both 1010 and 2220 depending on your consumer.
+
+Security
+
+- Do not commit real HA tokens. Use a read‑only long‑lived token.
+- This service is intended for trusted LANs. It provides unauthenticated endpoints by design to mimic Shelly devices.
+
+Limitations
+
+- Not a full Shelly implementation; only a subset of RPC is supported.
+- Energy math is approximate and depends on poll timing from HA.
+- mDNS behavior can vary across networks/containers; host networking is recommended.
+
+License
+
+- See repository license(s) of dependencies. This project is provided as‑is for personal/home use.
+
+Shoutouts
+
+- tomquist/b2500-meter: https://github.com/tomquist/b2500-meter
+  - This project’s Shelly-style UDP RPC behavior (EM.GetStatus/EM1.GetStatus formatting and decimal handling) is aligned for compatibility with b2500-meter.
+- sdeigm/uni-meter: https://github.com/sdeigm/uni-meter
+  - A universal meter emulator inspiring the broader idea of adaptable meter emulation on the LAN.

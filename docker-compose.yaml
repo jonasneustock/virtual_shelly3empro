@@ -1,0 +1,63 @@
+version: "3.8"
+services:
+  shelly3em-virtual:
+    build: .
+    container_name: shelly3em-virtual
+    restart: unless-stopped
+    network_mode: host   # recommended for UDP broadcast + mDNS
+    environment:
+      HA_BASE_URL: "http://homeassistant:8123"
+      HA_TOKEN: "${HA_TOKEN}"
+      POLL_INTERVAL: "2.0"
+
+      DEVICE_ID: "shellypro3em-virtual-001"
+      MODEL: "ShellyPro3EM"
+      FIRMWARE: "1.0.0-virt"
+      MAC: "AA:BB:CC:DD:EE:FF"
+      SN: "VIRT3EM001"
+
+      HTTP_PORT: "8080"
+
+      # WS fan-out
+      WS_PORT_START: "6010"
+      WS_PORT_END: "6022"
+
+      # UDP RPC (multiple)
+      UDP_PORTS: "1010,2220"
+      UDP_MAX: "32768"
+
+      # Minimal payload mode for EM.GetStatus
+      STRICT_MINIMAL_PAYLOAD: "true"
+
+      # mDNS
+      MDNS_ENABLE: "true"
+      MDNS_HOSTNAME: "shellypro3em-virtual-001"
+      # MDNS_IP: "192.168.1.50"   # optional pin
+
+      # HA entities
+      A_POWER: "sensor.phase_a_power"
+      B_POWER: "sensor.phase_b_power"
+      C_POWER: "sensor.phase_c_power"
+      A_VOLT: "sensor.phase_a_voltage"
+      B_VOLT: "sensor.phase_b_voltage"
+      C_VOLT: "sensor.phase_c_voltage"
+      A_CURR: "sensor.phase_a_current"
+      B_CURR: "sensor.phase_b_current"
+      C_CURR: "sensor.phase_c_current"
+      A_PF: "sensor.phase_a_pf"
+      B_PF: "sensor.phase_b_pf"
+      C_PF: "sensor.phase_c_pf"
+
+    volumes:
+      - shelly3em_state:/data
+
+# If you can’t use host networking, explicitly map ports; discovery via broadcast/mDNS may be limited:
+#    ports:
+#      - "8080:8080/tcp"
+#      - "6010-6022:6010-6022/tcp"
+#      - "1010:1010/udp"
+#      - "2220:2220/udp"
+#      - "5353:5353/udp"
+
+volumes:
+  shelly3em_state: {}
