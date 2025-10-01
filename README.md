@@ -50,7 +50,13 @@ Configuration (env vars)
   - `POLL_INTERVAL`: seconds between polls (default 2.0)
   - Entity IDs (override as needed): `A_POWER`, `B_POWER`, `C_POWER`, `A_VOLT`, `B_VOLT`, `C_VOLT`, `A_CURR`, `B_CURR`, `C_CURR`, `A_PF`, `B_PF`, `C_PF`
 - Device identity
-  - `DEVICE_ID`, `MODEL` (default `ShellyPro3EM`), `FIRMWARE`, `MAC`, `SN`, `MANUFACTURER`
+  - `DEVICE_ID`: Device identifier reported in RPC/mDNS (default `shellypro3em-virtual-001`)
+  - `APP_ID`: Shelly application identifier (default `shellypro3em`)
+  - `MODEL`: Hardware model string (default `SHPRO-3EM`)
+  - `FIRMWARE`: Firmware version reported as `ver` (default `1.0.0-virt`)
+  - `FW_ID`: Firmware build identifier reported as `fw_id` (defaults to the same as `FIRMWARE`)
+  - `MAC`, `SN`, `MANUFACTURER`
+  - `GENERATION`: Shelly generation advertised via HTTP and mDNS TXT records (default `2`)
 - HTTP/WebSocket
   - `HTTP_PORT`: used in mDNS TXT/adverts only. Uvicorn listens on port 80 by default in the container.
   - `WS_PORT_START`, `WS_PORT_END`: WS fan‑out TCP range (default 6010–6022)
