@@ -18,6 +18,10 @@ Features
 - UDP RPC (Shelly‑style, compatible with tomquist/b2500‑meter):
   - Supports `EM.GetStatus` (3‑phase) and `EM1.GetStatus` (single total) with identical rounding/decimal behavior.
   - Listens on configurable UDP ports (defaults include 1010 and 2220).
+- Modbus TCP server (pymodbus):
+  - Exposes key Shelly Pro 3EM measurements (voltage, current, power, PF, energy totals) as 32-bit floats.
+  - Read-only input/holding registers share the same data; writing `1` to holding register `4200` resets the virtual energy counters.
+  - Defaults to TCP port 502 with unit ID 1 (configurable via env vars).
 - mDNS service advertisements (`_http._tcp` and `_shelly._tcp`) for discovery.
 - Energy counters integrated from power over time and persisted at `/data/state.json` (via Docker volume).
 
@@ -57,6 +61,11 @@ Configuration (env vars)
   - `MDNS_ENABLE`: `true|false`
   - `MDNS_HOSTNAME`: instance name (defaults to `DEVICE_ID`)
   - `MDNS_IP`: optional explicit IP to advertise (helps with multi‑homed hosts)
+- Modbus TCP
+  - `MODBUS_ENABLE`: `true|false`
+  - `MODBUS_PORT`: TCP port for the Modbus server (default `502`)
+  - `MODBUS_BIND`: Bind address (default `0.0.0.0`)
+  - `MODBUS_UNIT_ID`: Unit identifier (default `1`)
 - Payload shape
   - `STRICT_MINIMAL_PAYLOAD`: when `true`, HTTP/WS `EM.GetStatus` returns only `{a_act_power,b_act_power,c_act_power,total_act_power}` (some gateways prefer this).
 - Persistence
@@ -116,6 +125,25 @@ Security
 
 - Do not commit real HA tokens. Use a read‑only long‑lived token.
 - This service is intended for trusted LANs. It provides unauthenticated endpoints by design to mimic Shelly devices.
+
+Modbus register map (summary)
+
+- Instantaneous values (float32, big-endian; accessible via holding or input registers):
+  - `3000/3001`: Line frequency (Hz)
+  - `3002-3007`: Phase A/B/C voltages (V)
+  - `3010-3015`: Phase A/B/C currents (A)
+  - `3020-3027`: Phase A/B/C active power and total active power (W)
+  - `3030-3035`: Power factor for phases A/B/C
+- Energy counters (float32 kWh):
+  - `3100-3105`: Import energy per phase (A/B/C)
+  - `3106-3111`: Export energy per phase (A/B/C)
+  - `3112/3113`: Total import energy; `3114/3115`: Total export energy
+- Diagnostics and metadata:
+  - `3200/3201`: Current UNIX timestamp; `3202/3203`: uptime seconds
+  - `3300+`: Device ID, model, firmware, MAC encoded as ASCII (2 chars per register)
+  - `3400`: Device ready flag (`1`); `3401`: phase count (`3`)
+- Commands:
+  - Write `1` to holding register `4200` to reset accumulated energy counters.
 
 Limitations
 
