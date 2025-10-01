@@ -56,11 +56,14 @@ B_PF = os.getenv("B_PF", "sensor.phase_b_pf")
 C_PF = os.getenv("C_PF", "sensor.phase_c_pf")
 
 DEVICE_ID = os.getenv("DEVICE_ID", "shellypro3em-virtual-001")
-MODEL = os.getenv("MODEL", "ShellyPro3EM")
+APP_ID = os.getenv("APP_ID", os.getenv("APP", "shellypro3em"))
+MODEL = os.getenv("MODEL", "SHPRO-3EM")
 FIRMWARE = os.getenv("FIRMWARE", "1.0.0-virt")
+FW_ID = os.getenv("FW_ID", FIRMWARE)
 MAC = os.getenv("MAC", "AA:BB:CC:DD:EE:FF")
 SN = os.getenv("SN", "VIRT3EM001")
-MANUFACTURER = os.getenv("MANUFACTURER", "Allterco Robotics (virtualized)")
+MANUFACTURER = os.getenv("MANUFACTURER", "Allterco Robotics")
+GENERATION = int(os.getenv("GENERATION", "2"))
 
 STATE_PATH = os.getenv("STATE_PATH", "/data/state.json")
 
@@ -157,8 +160,13 @@ class VirtualPro3EM:
         self.energy = EnergyCounters()
         self.config: Dict[str, Any] = {
             "device": {
-                "id": DEVICE_ID, "model": MODEL, "fw": FIRMWARE,
-                "mac": MAC, "sn": SN, "manufacturer": MANUFACTURER,
+                "id": DEVICE_ID,
+                "model": MODEL,
+                "fw": FIRMWARE,
+                "mac": MAC,
+                "sn": SN,
+                "manufacturer": MANUFACTURER,
+                "app": APP_ID,
             },
             "network": {"ipv4": "192.0.2.123", "ssid": None, "eth": True},
             "rpc": {"auth": False},
@@ -292,16 +300,45 @@ class VirtualPro3EM:
             "ts": now_ts(),
             "sys": {
                 "uptime": int(time.monotonic()),
-                "mac": MAC, "model": MODEL, "fw_id": FIRMWARE,
-                "device_id": DEVICE_ID, "time": datetime.now(timezone.utc).isoformat(),
+                "mac": MAC,
+                "model": MODEL,
+                "fw_id": FW_ID,
+                "device_id": DEVICE_ID,
+                "time": datetime.now(timezone.utc).isoformat(),
+                "app": APP_ID,
+                "gen": GENERATION,
             },
             "em:0": self.em_get_status({}),
             "emdata:0": self.emdata_get_status({}),
         }
 
+    def build_device_info(self) -> Dict[str, Any]:
+        auth_enabled = False
+        try:
+            auth_enabled = bool(self.config.get("rpc", {}).get("auth", False))
+        except Exception:
+            auth_enabled = False
+
+        info: Dict[str, Any] = {
+            "name": DEVICE_ID,
+            "id": DEVICE_ID,
+            "app": APP_ID,
+            "ver": FIRMWARE,
+            "fw_id": FW_ID,
+            "model": MODEL,
+            "gen": GENERATION,
+            "mac": MAC,
+            "auth_en": auth_enabled,
+            "auth_domain": None,
+        }
+        if SN:
+            info["sn"] = SN
+        if MANUFACTURER:
+            info["manufacturer"] = MANUFACTURER
+        return info
+
     def shelly_get_device_info(self, _params: Dict[str, Any]) -> Dict[str, Any]:
-        return {"name": DEVICE_ID, "id": DEVICE_ID, "app": MODEL, "ver": FIRMWARE, "fw_id": FIRMWARE,
-                "model": MODEL, "mac": MAC, "sn": SN, "manufacturer": MANUFACTURER}
+        return self.build_device_info()
 
     def shelly_get_config(self, _params: Dict[str, Any]) -> Dict[str, Any]:
         return self.config
@@ -654,25 +691,7 @@ def root():
 @app.get("/shelly")
 def shelly_http_info():
     # Shelly Gen2-compatible device info endpoint
-    auth_enabled = False
-    try:
-        auth_enabled = bool(VM.config.get("rpc", {}).get("auth", False))
-    except Exception:
-        auth_enabled = False
-    return {
-        "name": DEVICE_ID,
-        "id": DEVICE_ID,
-        "app": MODEL,
-        "ver": FIRMWARE,
-        "fw_id": FIRMWARE,
-        "model": MODEL,
-        "gen": 2,
-        "mac": MAC,
-        "sn": SN,
-        "manufacturer": MANUFACTURER,
-        "auth_en": auth_enabled,
-        "auth_domain": None,
-    }
+    return VM.build_device_info()
 
 # -----------------------------
 # Background: HA poller
@@ -872,10 +891,10 @@ def start_mdns():
     zc = Zeroconf(interfaces=InterfaceChoice.All)
 
     txt = {
-        "gen": "2",
+        "gen": str(GENERATION),
         "id": DEVICE_ID,
-        "app": MODEL,
-        "fw_id": FIRMWARE,
+        "app": APP_ID,
+        "fw_id": FW_ID,
         "model": MODEL,
         "ver": FIRMWARE,
         "mac": MAC,
