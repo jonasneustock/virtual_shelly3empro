@@ -12,6 +12,8 @@ Features
   - POST `/rpc`: JSON‑RPC 2.0 envelope for Shelly.* and EM*/EMData* methods.
   - GET `/rpc?method=...` and GET `/rpc/{method}`: returns the method result directly (no envelope), matching Shelly GET semantics.
   - GET `/healthz` and GET `/`: simple health and info.
+  - GET `/chint/expose/capabilities`: exposes the CHINT compatibility payload also available via the `CHINT.ExposeCapabilities` RPC method.
+  - GET `/chint/modbus/registers`: HTTP view of the CHINT Modbus register image (supports optional float32/int32/uint32 decoding).
 - WebSockets:
   - WS `/rpc`: JSON‑RPC over WebSocket (common for Shelly Gen2).
   - Fan‑out WS servers on TCP ports 6010–6022 echoing RPC responses (configurable).
@@ -85,6 +87,12 @@ APIs
   - `/rpc?method=EM.GetStatus&id=0`
   - `/rpc/EM.GetStatus?id=0`
   - Response is the method result object, e.g. `{ "a_act_power": 123.4, ... }`
+- CHINT capabilities:
+  - RPC: `{ "id": 1, "method": "CHINT.ExposeCapabilities" }`
+  - HTTP helper: `GET /chint/expose/capabilities`
+  - Returns metadata about the emulator, transport support, and live telemetry snapshots used by CHINT/Avocado clients.
+  - Modbus register snapshot: `GET /chint/modbus/registers?address=3000&count=32&decode=float32`
+    - Returns 16-bit register values plus optional decoded 32-bit pairs to emulate the Modbus TCP surface via HTTP.
 - WebSocket RPC:
   - Connect `ws://<ip>/rpc` and send the same JSON‑RPC envelopes as POST `/rpc`.
 - Shelly‑style UDP RPC (b2500 compatible):

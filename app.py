@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 
 import requests
-from fastapi import FastAPI, Request, WebSocket
+from fastapi import FastAPI, Request, WebSocket, HTTPException, Query
 from starlette.responses import JSONResponse
 
 # mDNS
@@ -312,6 +312,74 @@ class VirtualPro3EM:
             "emdata:0": self.emdata_get_status({}),
         }
 
+    def chint_expose_capabilities(self, _params: Dict[str, Any]) -> Dict[str, Any]:
+        with self.lock:
+            phase_snapshot = {
+                label: {
+                    "voltage": round(phase.voltage, 2) if phase.voltage is not None else None,
+                    "current": round(phase.current, 3) if phase.current is not None else None,
+                    "act_power": round(phase.act_power, 2),
+                    "pf": round(phase.pf, 3) if phase.pf is not None else None,
+                }
+                for label, phase in self.phases.items()
+            }
+            total_act_power = round(
+                sum(phase.act_power or 0.0 for phase in self.phases.values()), 3
+            )
+            energy_snapshot = {
+                "import": {
+                    "a": round(self.energy.a_import, 6),
+                    "b": round(self.energy.b_import, 6),
+                    "c": round(self.energy.c_import, 6),
+                    "total": round(self.energy.total_import, 6),
+                },
+                "export": {
+                    "a": round(self.energy.a_export, 6),
+                    "b": round(self.energy.b_export, 6),
+                    "c": round(self.energy.c_export, 6),
+                    "total": round(self.energy.total_export, 6),
+                },
+                "since": self.energy.since,
+            }
+
+        return {
+            "device": {
+                "id": DEVICE_ID,
+                "target": {
+                    "manufacturer": "CHINT",
+                    "model": "DTSU666",
+                },
+                "emulator": {
+                    "manufacturer": MANUFACTURER,
+                    "model": MODEL,
+                    "firmware": FIRMWARE,
+                    "project": "DTSU666Emulator",
+                },
+            },
+            "capabilities": {
+                "phases": phase_snapshot,
+                "total_act_power": total_act_power,
+                "frequency": self.frequency,
+                "energy_counters": energy_snapshot,
+                "transports": {
+                    "http_rpc": True,
+                    "udp_rpc": bool(UDP_PORTS),
+                    "modbus_tcp": bool(MODBUS_ENABLE),
+                },
+                "rpc_methods": sorted(METHODS.keys()),
+            },
+            "links": {
+                "self": "/rpc?method=CHINT.ExposeCapabilities",
+                "http": "/chint/expose/capabilities",
+                "modbus_registers": "/chint/modbus/registers",
+                "shelly_device_info": "/rpc?method=Shelly.GetDeviceInfo",
+                "avocado": {
+                    "compatible": True,
+                    "notes": "Avocado clients can consume CHINT-compatible telemetry via this emulator.",
+                },
+            },
+        }
+
     def build_device_info(self) -> Dict[str, Any]:
         auth_enabled = False
         try:
@@ -583,6 +651,7 @@ METHODS = {
     "MQTT.GetConfig": VM.mqtt_get_config,
     "MQTT.SetConfig": VM.mqtt_set_config,
     "Sys.GetStatus": VM.sys_get_status,
+    "CHINT.ExposeCapabilities": VM.chint_expose_capabilities,
 }
 
 def _handle_rpc_call(req: Dict[str, Any]) -> Dict[str, Any]:
@@ -692,6 +761,65 @@ def root():
 def shelly_http_info():
     # Shelly Gen2-compatible device info endpoint
     return VM.build_device_info()
+
+
+@app.get("/chint/expose/capabilities")
+def chint_http_capabilities():
+    """HTTP helper mirroring CHINT.ExposeCapabilities RPC."""
+    return VM.chint_expose_capabilities({})
+
+
+@app.get("/chint/modbus/registers")
+def chint_modbus_registers(
+    address: int = Query(3000, ge=0, le=9999),
+    count: int = Query(32, ge=1, le=512),
+    decode: Optional[str] = Query(
+        None, description="Optional decode mode: float32, int32, or uint32"
+    ),
+):
+    """Expose the current Modbus register image over HTTP for CHINT clients."""
+
+    if not MODBUS_ENABLE or MODBUS_BRIDGE is None:
+        raise HTTPException(status_code=503, detail="Modbus TCP bridge disabled")
+
+    registers = MODBUS_BRIDGE.get_values(address, count)
+    response: Dict[str, Any] = {
+        "unit_id": MODBUS_UNIT_ID,
+        "address": address,
+        "count": count,
+        "registers": registers,
+    }
+
+    if decode:
+        decode = decode.lower()
+        supported = {"float32", "int32", "uint32"}
+        if decode not in supported:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported decode mode '{decode}'. Supported: {sorted(supported)}",
+            )
+
+        decoded: List[Optional[float]] = []
+        for offset in range(0, len(registers), 2):
+            if offset + 1 >= len(registers):
+                break
+            raw = struct.pack(">HH", registers[offset], registers[offset + 1])
+            try:
+                if decode == "float32":
+                    decoded.append(struct.unpack(">f", raw)[0])
+                elif decode == "int32":
+                    decoded.append(float(struct.unpack(">i", raw)[0]))
+                else:  # uint32
+                    decoded.append(float(struct.unpack(">I", raw)[0]))
+            except Exception:
+                decoded.append(None)
+
+        response["decoded_pairs"] = {
+            "mode": decode,
+            "values": decoded,
+        }
+
+    return response
 
 # -----------------------------
 # Background: HA poller
