@@ -295,6 +295,68 @@ class VirtualPro3EM:
             MODBUS_BRIDGE.update()
         return {"ok": True, "ts": now_ts()}
 
+    # ---------- EcoTracker helpers ----------
+    def _validate_meter_id(self, params: Dict[str, Any]) -> int:
+        if params is None or not isinstance(params, dict):
+            raise ValueError("Invalid params")
+        meter_id = params.get("id")
+        if meter_id not in (0, None):
+            raise ValueError("Unsupported meter id")
+        return 0
+
+    def ecotracker_get_status(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        self._validate_meter_id(params)
+        with self.lock:
+            phases_payload: Dict[str, Any] = {}
+            total_act_power = 0.0
+            for label, phase in self.phases.items():
+                act_power = float(phase.act_power or 0.0)
+                total_act_power += act_power
+                phases_payload[label] = {
+                    "voltage": phase.voltage if phase.voltage is not None else 230.0,
+                    "current": phase.current if phase.current is not None else 0.0,
+                    "act_power": round(act_power, 2),
+                    "pf": phase.pf if phase.pf is not None else 1.0,
+                }
+
+            counters = {
+                "import_act_energy": round(self.energy.total_import, 6),
+                "export_act_energy": round(self.energy.total_export, 6),
+                "since": self.energy.since,
+            }
+
+            return {
+                "id": 0,
+                "phase_cnt": len(self.phases),
+                "frequency": self.frequency,
+                "total_act_power": round(total_act_power, 2),
+                "phases": phases_payload,
+                "grid": counters,
+                "ts": now_ts(),
+            }
+
+    def ecotracker_get_counters(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        self._validate_meter_id(params)
+        with self.lock:
+            e = self.energy
+            per_phase: Dict[str, Any] = {}
+            for label in self.phases:
+                per_phase[label] = {
+                    "import_act_energy": round(getattr(e, f"{label}_import"), 6),
+                    "export_act_energy": round(getattr(e, f"{label}_export"), 6),
+                }
+
+            return {
+                "id": 0,
+                "since": e.since,
+                "total": {
+                    "import_act_energy": round(e.total_import, 6),
+                    "export_act_energy": round(e.total_export, 6),
+                },
+                "phases": per_phase,
+                "ts": now_ts(),
+            }
+
     def shelly_get_status(self, _params: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "ts": now_ts(),
@@ -580,6 +642,8 @@ METHODS = {
     "EM.GetStatus": VM.em_get_status,
     "EMData.GetStatus": VM.emdata_get_status,
     "EMData.ResetCounters": VM.emdata_reset_counters,
+    "EcoTracker.GetStatus": VM.ecotracker_get_status,
+    "EcoTracker.GetCounters": VM.ecotracker_get_counters,
     "MQTT.GetConfig": VM.mqtt_get_config,
     "MQTT.SetConfig": VM.mqtt_set_config,
     "Sys.GetStatus": VM.sys_get_status,
@@ -692,6 +756,24 @@ def root():
 def shelly_http_info():
     # Shelly Gen2-compatible device info endpoint
     return VM.build_device_info()
+
+@app.get("/ecotracker")
+def ecotracker_info():
+    # Basic info endpoint similar to Shelly EcoTracker HTTP interface
+    info = VM.build_device_info()
+    info.update({
+        "phase_cnt": len(VM.phases),
+        "frequency": VM.frequency,
+    })
+    return info
+
+@app.get("/ecotracker/status")
+def ecotracker_status():
+    return VM.ecotracker_get_status({})
+
+@app.get("/ecotracker/counters")
+def ecotracker_counters():
+    return VM.ecotracker_get_counters({})
 
 # -----------------------------
 # Background: HA poller
