@@ -880,26 +880,42 @@ def start_mdns():
         "ver": FIRMWARE,
         "mac": MAC,
     }
-    info_http = ServiceInfo(
-        "_http._tcp.local.",
-        f"{instance}._http._tcp.local.",
-        addresses=[addr],
-        port=HTTP_PORT,
-        properties={k.encode(): v.encode() for k, v in txt.items()},
-        server=f"{instance}.local.",
-    )
-    info_shelly = ServiceInfo(
-        "_shelly._tcp.local.",
-        f"{instance}._shelly._tcp.local.",
-        addresses=[addr],
-        port=HTTP_PORT,
-        properties={k.encode(): v.encode() for k, v in txt.items()},
-        server=f"{instance}.local.",
-    )
+    services = [
+        ServiceInfo(
+            "_http._tcp.local.",
+            f"{instance}._http._tcp.local.",
+            addresses=[addr],
+            port=HTTP_PORT,
+            properties={k.encode(): v.encode() for k, v in txt.items()},
+            server=f"{instance}.local.",
+        ),
+        ServiceInfo(
+            "_shelly._tcp.local.",
+            f"{instance}._shelly._tcp.local.",
+            addresses=[addr],
+            port=HTTP_PORT,
+            properties={k.encode(): v.encode() for k, v in txt.items()},
+            server=f"{instance}.local.",
+        ),
+    ]
+
+    if MODBUS_ENABLE:
+        services.append(
+            ServiceInfo(
+                "_modbus._tcp.local.",
+                f"{instance}._modbus._tcp.local.",
+                addresses=[addr],
+                port=MODBUS_PORT,
+                properties={k.encode(): v.encode() for k, v in txt.items()},
+                server=f"{instance}.local.",
+            )
+        )
+
     def _register():
-        zc.register_service(info_http)
-        zc.register_service(info_shelly)
+        for svc in services:
+            zc.register_service(svc)
         while True:
+            # Zeroconf needs the thread alive so the service stays announced; sleep long.
             time.sleep(3600)
     threading.Thread(target=_register, daemon=True).start()
 
