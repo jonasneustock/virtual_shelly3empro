@@ -4,8 +4,9 @@ import json
 import threading
 import socket
 import asyncio
-import signal
 import logging
+import struct
+import signal
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List, Tuple
 from collections import defaultdict
@@ -19,6 +20,18 @@ from starlette.responses import JSONResponse
 from zeroconf import Zeroconf, ServiceInfo, InterfaceChoice
 # WebSockets fan-out (6010–6022)
 import websockets
+
+try:
+    from pymodbus.datastore import (
+        ModbusSlaveContext,
+        ModbusServerContext,
+        ModbusSparseDataBlock,
+        ModbusSequentialDataBlock,
+    )
+    from pymodbus.device import ModbusDeviceIdentification
+    from pymodbus.server.async_io import StartAsyncTcpServer
+except Exception:  # pragma: no cover - pymodbus optional at import time
+    StartAsyncTcpServer = None
 # Models
 from pydantic import BaseModel
 
@@ -46,11 +59,14 @@ B_PF = os.getenv("B_PF", "sensor.phase_b_pf")
 C_PF = os.getenv("C_PF", "sensor.phase_c_pf")
 
 DEVICE_ID = os.getenv("DEVICE_ID", "shellypro3em-virtual-001")
-MODEL = os.getenv("MODEL", "ShellyPro3EM")
+APP_ID = os.getenv("APP_ID", os.getenv("APP", "shellypro3em"))
+MODEL = os.getenv("MODEL", "SHPRO-3EM")
 FIRMWARE = os.getenv("FIRMWARE", "1.0.0-virt")
+FW_ID = os.getenv("FW_ID", FIRMWARE)
 MAC = os.getenv("MAC", "AA:BB:CC:DD:EE:FF")
 SN = os.getenv("SN", "VIRT3EM001")
-MANUFACTURER = os.getenv("MANUFACTURER", "Allterco Robotics (virtualized)")
+MANUFACTURER = os.getenv("MANUFACTURER", "Allterco Robotics")
+GENERATION = int(os.getenv("GENERATION", "2"))
 
 STATE_PATH = os.getenv("STATE_PATH", "/data/state.json")
 
@@ -69,6 +85,12 @@ UDP_MAX = int(os.getenv("UDP_MAX", "32768"))
 MDNS_ENABLE = os.getenv("MDNS_ENABLE", "true").lower() in ("1", "true", "yes")
 MDNS_HOSTNAME = os.getenv("MDNS_HOSTNAME", DEVICE_ID)
 MDNS_IP = os.getenv("MDNS_IP")  # optional override
+
+# Modbus TCP
+MODBUS_ENABLE = os.getenv("MODBUS_ENABLE", "true").lower() in ("1", "true", "yes")
+MODBUS_PORT = int(os.getenv("MODBUS_PORT", "502"))
+MODBUS_BIND = os.getenv("MODBUS_BIND", "0.0.0.0")
+MODBUS_UNIT_ID = int(os.getenv("MODBUS_UNIT_ID", "1"))
 
 # Payload shape tweak (Marstek/Hoymiles consumers)
 STRICT_MINIMAL_PAYLOAD = os.getenv("STRICT_MINIMAL_PAYLOAD", "false").lower() in ("1", "true", "yes")
@@ -151,8 +173,13 @@ class VirtualPro3EM:
         self.energy = EnergyCounters()
         self.config: Dict[str, Any] = {
             "device": {
-                "id": DEVICE_ID, "model": MODEL, "fw": FIRMWARE,
-                "mac": MAC, "sn": SN, "manufacturer": MANUFACTURER,
+                "id": DEVICE_ID,
+                "model": MODEL,
+                "fw": FIRMWARE,
+                "mac": MAC,
+                "sn": SN,
+                "manufacturer": MANUFACTURER,
+                "app": APP_ID,
             },
             "network": {"ipv4": "192.0.2.123", "ssid": None, "eth": True},
             "rpc": {"auth": False},
@@ -287,23 +314,54 @@ class VirtualPro3EM:
         with self.lock:
             self.energy = EnergyCounters(since=now_ts())
             self.persist()
-            return {"ok": True, "ts": now_ts()}
+        if MODBUS_BRIDGE:
+            MODBUS_BRIDGE.update()
+        return {"ok": True, "ts": now_ts()}
 
     def shelly_get_status(self, _params: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "ts": now_ts(),
             "sys": {
                 "uptime": int(time.monotonic()),
-                "mac": MAC, "model": MODEL, "fw_id": FIRMWARE,
-                "device_id": DEVICE_ID, "time": datetime.now(timezone.utc).isoformat(),
+                "mac": MAC,
+                "model": MODEL,
+                "fw_id": FW_ID,
+                "device_id": DEVICE_ID,
+                "time": datetime.now(timezone.utc).isoformat(),
+                "app": APP_ID,
+                "gen": GENERATION,
             },
             "em:0": self.em_get_status({"id": 0}),
             "emdata:0": self.emdata_get_status({"id": 0}),
         }
 
+    def build_device_info(self) -> Dict[str, Any]:
+        auth_enabled = False
+        try:
+            auth_enabled = bool(self.config.get("rpc", {}).get("auth", False))
+        except Exception:
+            auth_enabled = False
+
+        info: Dict[str, Any] = {
+            "name": DEVICE_ID,
+            "id": DEVICE_ID,
+            "app": APP_ID,
+            "ver": FIRMWARE,
+            "fw_id": FW_ID,
+            "model": MODEL,
+            "gen": GENERATION,
+            "mac": MAC,
+            "auth_en": auth_enabled,
+            "auth_domain": None,
+        }
+        if SN:
+            info["sn"] = SN
+        if MANUFACTURER:
+            info["manufacturer"] = MANUFACTURER
+        return info
+
     def shelly_get_device_info(self, _params: Dict[str, Any]) -> Dict[str, Any]:
-        return {"name": DEVICE_ID, "id": DEVICE_ID, "app": MODEL, "ver": FIRMWARE, "fw_id": FIRMWARE,
-                "model": MODEL, "mac": MAC, "sn": SN, "manufacturer": MANUFACTURER}
+        return self.build_device_info()
 
     # Gen2 Sys.* helpers
     def sys_get_info(self, _params: Dict[str, Any]) -> Dict[str, Any]:
@@ -355,6 +413,191 @@ class VirtualPro3EM:
             "time": datetime.now(timezone.utc).isoformat(), "device": DEVICE_ID,
         }
 
+
+# -----------------------------
+# Modbus TCP bridge
+# -----------------------------
+MODBUS_LOG = logging.getLogger("virtual_shelly.modbus")
+
+
+def _pack_register_pair(value: float, fmt: str) -> List[int]:
+    if fmt == ">f":
+        raw = struct.pack(fmt, float(value))
+    elif fmt == ">I":
+        raw = struct.pack(fmt, int(value) & 0xFFFFFFFF)
+    elif fmt == ">i":
+        raw = struct.pack(fmt, int(value))
+    else:
+        raise ValueError(f"Unsupported pack format {fmt}")
+    hi, lo = struct.unpack(">HH", raw)
+    return [hi, lo]
+
+
+def _encode_ascii_registers(text: str, register_count: int) -> List[int]:
+    data = (text or "").encode("ascii", errors="ignore")[: register_count * 2]
+    data = data.ljust(register_count * 2, b"\x00")
+    regs: List[int] = []
+    for i in range(register_count):
+        hi = data[2 * i]
+        lo = data[2 * i + 1]
+        regs.append((hi << 8) | lo)
+    return regs
+
+
+class ShellyModbusBridge:
+    """Maintains a Modbus register image reflecting the virtual meter state."""
+
+    def __init__(self, vm: VirtualPro3EM):
+        self.vm = vm
+        self.lock = threading.RLock()
+        self.registers: Dict[int, int] = {}
+        self.update()
+
+    def _write_pair(self, regs: Dict[int, int], address: int, values: List[int]) -> None:
+        regs[address] = values[0]
+        regs[address + 1] = values[1]
+
+    def _write_ascii(self, regs: Dict[int, int], address: int, register_count: int, text: str) -> None:
+        for idx, value in enumerate(_encode_ascii_registers(text, register_count)):
+            regs[address + idx] = value
+
+    def build_image(self) -> Dict[int, int]:
+        regs: Dict[int, int] = {}
+        with self.vm.lock:
+            phases = self.vm.phases
+            energy = self.vm.energy
+            freq = float(self.vm.frequency or 0.0)
+
+            # Instantaneous metrics (float32, big-endian)
+            self._write_pair(regs, 3000, _pack_register_pair(freq, ">f"))
+            self._write_pair(regs, 3002, _pack_register_pair(phases["a"].voltage or 0.0, ">f"))
+            self._write_pair(regs, 3004, _pack_register_pair(phases["b"].voltage or 0.0, ">f"))
+            self._write_pair(regs, 3006, _pack_register_pair(phases["c"].voltage or 0.0, ">f"))
+
+            self._write_pair(regs, 3010, _pack_register_pair(phases["a"].current or 0.0, ">f"))
+            self._write_pair(regs, 3012, _pack_register_pair(phases["b"].current or 0.0, ">f"))
+            self._write_pair(regs, 3014, _pack_register_pair(phases["c"].current or 0.0, ">f"))
+
+            total_power = (phases["a"].act_power or 0.0) + (phases["b"].act_power or 0.0) + (phases["c"].act_power or 0.0)
+            self._write_pair(regs, 3020, _pack_register_pair(phases["a"].act_power, ">f"))
+            self._write_pair(regs, 3022, _pack_register_pair(phases["b"].act_power, ">f"))
+            self._write_pair(regs, 3024, _pack_register_pair(phases["c"].act_power, ">f"))
+            self._write_pair(regs, 3026, _pack_register_pair(total_power, ">f"))
+
+            self._write_pair(regs, 3030, _pack_register_pair(phases["a"].pf if phases["a"].pf is not None else 1.0, ">f"))
+            self._write_pair(regs, 3032, _pack_register_pair(phases["b"].pf if phases["b"].pf is not None else 1.0, ">f"))
+            self._write_pair(regs, 3034, _pack_register_pair(phases["c"].pf if phases["c"].pf is not None else 1.0, ">f"))
+
+            # Energy counters (kWh as float32)
+            self._write_pair(regs, 3100, _pack_register_pair(energy.a_import, ">f"))
+            self._write_pair(regs, 3102, _pack_register_pair(energy.b_import, ">f"))
+            self._write_pair(regs, 3104, _pack_register_pair(energy.c_import, ">f"))
+            self._write_pair(regs, 3106, _pack_register_pair(energy.a_export, ">f"))
+            self._write_pair(regs, 3108, _pack_register_pair(energy.b_export, ">f"))
+            self._write_pair(regs, 3110, _pack_register_pair(energy.c_export, ">f"))
+            self._write_pair(regs, 3112, _pack_register_pair(energy.total_import, ">f"))
+            self._write_pair(regs, 3114, _pack_register_pair(energy.total_export, ">f"))
+
+            # Timestamp and uptime (uint32)
+            self._write_pair(regs, 3200, _pack_register_pair(now_ts(), ">I"))
+            self._write_pair(regs, 3202, _pack_register_pair(int(time.monotonic()), ">I"))
+
+            # Device metadata (ASCII, two chars per register)
+            self._write_ascii(regs, 3300, 8, DEVICE_ID)
+            self._write_ascii(regs, 3310, 6, MODEL)
+            self._write_ascii(regs, 3320, 6, FIRMWARE)
+            self._write_ascii(regs, 3330, 6, MAC)
+
+            # Status flags (uint16)
+            regs[3400] = 1  # device online
+            regs[3401] = 3  # number of phases
+
+        return regs
+
+    def update(self) -> None:
+        snapshot = self.build_image()
+        with self.lock:
+            self.registers = snapshot
+
+    def get_values(self, address: int, count: int) -> List[int]:
+        with self.lock:
+            return [self.registers.get(address + offset, 0) & 0xFFFF for offset in range(count)]
+
+    def handle_write(self, address: int, values: List[int]) -> None:
+        if not values:
+            return
+        if address == 4200 and values[0] == 1:
+            MODBUS_LOG.info("Modbus request: reset energy counters")
+            self.vm.emdata_reset_counters({})
+            self.update()
+
+
+class ShellyModbusInputBlock(ModbusSparseDataBlock):
+    def __init__(self, bridge: ShellyModbusBridge):
+        super().__init__({})
+        self.bridge = bridge
+
+    def getValues(self, address: int, count: int = 1) -> List[int]:  # type: ignore[override]
+        return self.bridge.get_values(address, count)
+
+
+class ShellyModbusHoldingBlock(ModbusSparseDataBlock):
+    def __init__(self, bridge: ShellyModbusBridge):
+        super().__init__({})
+        self.bridge = bridge
+
+    def getValues(self, address: int, count: int = 1) -> List[int]:  # type: ignore[override]
+        return self.bridge.get_values(address, count)
+
+    def setValues(self, address: int, values: List[int]) -> None:  # type: ignore[override]
+        self.bridge.handle_write(address, values)
+
+
+def start_modbus_server(bridge: ShellyModbusBridge) -> None:
+    if not MODBUS_ENABLE:
+        return
+    if StartAsyncTcpServer is None:
+        MODBUS_LOG.warning("pymodbus not available; Modbus TCP disabled")
+        return
+
+    slave = ModbusSlaveContext(
+        di=ModbusSequentialDataBlock(0, [0] * 4),
+        co=ModbusSequentialDataBlock(0, [0] * 4),
+        hr=ShellyModbusHoldingBlock(bridge),
+        ir=ShellyModbusInputBlock(bridge),
+        zero_mode=True,
+    )
+    context = ModbusServerContext(slaves={MODBUS_UNIT_ID: slave}, single=False)
+
+    identity = ModbusDeviceIdentification()
+    identity.VendorName = "Shelly"
+    identity.ProductCode = "SP3EM"
+    identity.VendorUrl = "https://shelly.cloud"
+    identity.ProductName = "Shelly Pro 3EM (virtual)"
+    identity.ModelName = MODEL
+    identity.MajorMinorRevision = FIRMWARE
+    try:
+        identity.UnitIdentifier = MODBUS_UNIT_ID  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
+    async def _serve():
+        MODBUS_LOG.info("Starting Modbus TCP on %s:%s", MODBUS_BIND, MODBUS_PORT)
+        await StartAsyncTcpServer(
+            context=context,
+            identity=identity,
+            address=(MODBUS_BIND, MODBUS_PORT),
+            allow_reuse_address=True,
+        )
+
+    def _runner():
+        try:
+            asyncio.run(_serve())
+        except Exception as exc:  # pragma: no cover - background log only
+            MODBUS_LOG.error("Modbus server stopped: %s", exc)
+
+    threading.Thread(target=_runner, daemon=True).start()
+
 # -----------------------------
 # JSON-RPC dispatcher
 # -----------------------------
@@ -364,6 +607,14 @@ log = logging.getLogger("virtual_shelly")
 
 app = FastAPI(title="Virtual Shelly Pro 3EM RPC")
 VM = VirtualPro3EM()
+MODBUS_BRIDGE: Optional[ShellyModbusBridge] = None
+if MODBUS_ENABLE:
+    try:
+        MODBUS_BRIDGE = ShellyModbusBridge(VM)
+        start_modbus_server(MODBUS_BRIDGE)
+    except Exception as exc:  # pragma: no cover - background log only
+        MODBUS_LOG.error("Failed to start Modbus bridge: %s", exc)
+        MODBUS_BRIDGE = None
 
 if CORS_ENABLE:
     origins = [o.strip() for o in CORS_ORIGINS.split(",") if o.strip()] or ["*"]
@@ -691,6 +942,8 @@ def shelly_http_info():
 def poll_loop():
     while True:
         VM.poll_home_assistant()
+        if MODBUS_BRIDGE:
+            MODBUS_BRIDGE.update()
         # Throttled WS notify broadcast
         try:
             global _last_notify_mono
@@ -978,30 +1231,45 @@ def start_mdns():
         zc = Zeroconf(interfaces=InterfaceChoice.Default)
 
     txt = {
-        "gen": "2",
+        "gen": str(GENERATION),
         "id": DEVICE_ID,
-        "app": MODEL,
-        "fw_id": FIRMWARE,
+        "app": APP_ID,
+        "fw_id": FW_ID,
         "model": MODEL,
         "ver": FIRMWARE,
         "mac": MAC,
     }
-    info_http = ServiceInfo(
-        "_http._tcp.local.",
-        f"{instance}._http._tcp.local.",
-        addresses=[addr],
-        port=HTTP_PORT,
-        properties={k.encode(): v.encode() for k, v in txt.items()},
-        server=f"{instance}.local.",
-    )
-    info_shelly = ServiceInfo(
-        "_shelly._tcp.local.",
-        f"{instance}._shelly._tcp.local.",
-        addresses=[addr],
-        port=HTTP_PORT,
-        properties={k.encode(): v.encode() for k, v in txt.items()},
-        server=f"{instance}.local.",
-    )
+    services = [
+        ServiceInfo(
+            "_http._tcp.local.",
+            f"{instance}._http._tcp.local.",
+            addresses=[addr],
+            port=HTTP_PORT,
+            properties={k.encode(): v.encode() for k, v in txt.items()},
+            server=f"{instance}.local.",
+        ),
+        ServiceInfo(
+            "_shelly._tcp.local.",
+            f"{instance}._shelly._tcp.local.",
+            addresses=[addr],
+            port=HTTP_PORT,
+            properties={k.encode(): v.encode() for k, v in txt.items()},
+            server=f"{instance}.local.",
+        ),
+    ]
+
+    if MODBUS_ENABLE:
+        services.append(
+            ServiceInfo(
+                "_modbus._tcp.local.",
+                f"{instance}._modbus._tcp.local.",
+                addresses=[addr],
+                port=MODBUS_PORT,
+                properties={k.encode(): v.encode() for k, v in txt.items()},
+                server=f"{instance}.local.",
+            )
+        )
+
     def _register():
         # Register with explicit TTL (seconds)
         try:
