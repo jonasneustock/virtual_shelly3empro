@@ -4,11 +4,15 @@ import json
 import threading
 import socket
 import asyncio
+import signal
+import logging
 from datetime import datetime, timezone
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
+from collections import defaultdict
 
 import requests
 from fastapi import FastAPI, Request, WebSocket
+from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse
 
 # mDNS
@@ -68,6 +72,15 @@ MDNS_IP = os.getenv("MDNS_IP")  # optional override
 
 # Payload shape tweak (Marstek/Hoymiles consumers)
 STRICT_MINIMAL_PAYLOAD = os.getenv("STRICT_MINIMAL_PAYLOAD", "false").lower() in ("1", "true", "yes")
+
+# WS notify throttle (seconds)
+WS_NOTIFY_INTERVAL = float(os.getenv("WS_NOTIFY_INTERVAL", "2.0"))
+# WS notify coalescing threshold (watts); broadcast only if delta >= EPS
+WS_NOTIFY_EPS = float(os.getenv("WS_NOTIFY_EPS", "0.1"))
+
+# CORS (optional)
+CORS_ENABLE = os.getenv("CORS_ENABLE", "false").lower() in ("1", "true", "yes")
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*")
 
 # -----------------------------
 # Helpers
@@ -131,7 +144,8 @@ class EnergyCounters(BaseModel):
 class VirtualPro3EM:
     def __init__(self):
         self.lock = threading.RLock()
-        self.last_poll = None
+        self.last_poll_mono: Optional[float] = None
+        self.last_persist_mono: float = time.monotonic()
         self.phases = {"a": Phase(), "b": Phase(), "c": Phase()}
         self.frequency = 50.0
         self.energy = EnergyCounters()
@@ -195,20 +209,27 @@ class VirtualPro3EM:
                 self.phases["b"].pf = ha_get(B_PF) or None
                 self.phases["c"].pf = ha_get(C_PF) or None
 
-            now = now_ts()
-            if self.last_poll is not None:
-                dt = max(0.0, now - self.last_poll)
+            # Integrate using monotonic time to avoid wall clock jumps
+            now_mono = time.monotonic()
+            if self.last_poll_mono is not None:
+                dt = max(0.0, now_mono - self.last_poll_mono)
                 if dt > 0:
                     self.integrate_energy(dt)
-            self.last_poll = now
+            self.last_poll_mono = now_mono
 
-            if now % 30 == 0:
+            # Persist every 30s using monotonic cadence
+            if (now_mono - self.last_persist_mono) >= 30.0:
                 self.persist()
+                self.last_persist_mono = now_mono
         except Exception:
             pass
 
     # ---------- RPC builders ----------
-    def em_get_status(self, _params: Dict[str, Any]) -> Dict[str, Any]:
+    def em_get_status(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        # Validate channel id; Shelly 3EM uses id=0
+        chan = params.get("id", 0)
+        if chan not in (0,):
+            raise ValueError("invalid id")
         with self.lock:
             a, b, c = self.phases["a"], self.phases["b"], self.phases["c"]
             total_w = (a.act_power or 0.0) + (b.act_power or 0.0) + (c.act_power or 0.0)
@@ -242,7 +263,10 @@ class VirtualPro3EM:
                 "ts": now_ts(),
             }
 
-    def emdata_get_status(self, _params: Dict[str, Any]) -> Dict[str, Any]:
+    def emdata_get_status(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        chan = params.get("id", 0)
+        if chan not in (0,):
+            raise ValueError("invalid id")
         with self.lock:
             e = self.energy
             return {
@@ -273,13 +297,29 @@ class VirtualPro3EM:
                 "mac": MAC, "model": MODEL, "fw_id": FIRMWARE,
                 "device_id": DEVICE_ID, "time": datetime.now(timezone.utc).isoformat(),
             },
-            "em:0": self.em_get_status({}),
-            "emdata:0": self.emdata_get_status({}),
+            "em:0": self.em_get_status({"id": 0}),
+            "emdata:0": self.emdata_get_status({"id": 0}),
         }
 
     def shelly_get_device_info(self, _params: Dict[str, Any]) -> Dict[str, Any]:
         return {"name": DEVICE_ID, "id": DEVICE_ID, "app": MODEL, "ver": FIRMWARE, "fw_id": FIRMWARE,
                 "model": MODEL, "mac": MAC, "sn": SN, "manufacturer": MANUFACTURER}
+
+    # Gen2 Sys.* helpers
+    def sys_get_info(self, _params: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "name": DEVICE_ID,
+            "id": DEVICE_ID,
+            "model": MODEL,
+            "mac": MAC,
+            "fw_id": FIRMWARE,
+            "ver": FIRMWARE,
+            "app": MODEL,
+            "uptime": int(time.monotonic()),
+        }
+
+    def sys_set_config(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        return self.shelly_set_config(params)
 
     def shelly_get_config(self, _params: Dict[str, Any]) -> Dict[str, Any]:
         return self.config
@@ -305,6 +345,9 @@ class VirtualPro3EM:
     def mqtt_set_config(self, params: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": True}
 
+    def mqtt_status(self, _params: Dict[str, Any]) -> Dict[str, Any]:
+        return {"connected": False, "client_id": DEVICE_ID, "server": None}
+
     def sys_get_status(self, _params: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "ram_total": 64 * 1024 * 1024, "ram_free": 48 * 1024 * 1024,
@@ -315,14 +358,94 @@ class VirtualPro3EM:
 # -----------------------------
 # JSON-RPC dispatcher
 # -----------------------------
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO), format='%(asctime)s %(levelname)s %(message)s')
+log = logging.getLogger("virtual_shelly")
+
 app = FastAPI(title="Virtual Shelly Pro 3EM RPC")
 VM = VirtualPro3EM()
+
+if CORS_ENABLE:
+    origins = [o.strip() for o in CORS_ORIGINS.split(",") if o.strip()] or ["*"]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+# -----------------------------
+# WS Notify infrastructure (FastAPI /rpc)
+# -----------------------------
+WS_RPC_CLIENTS: "set[WebSocket]" = set()
+WS_QUEUE: Optional[asyncio.Queue] = None
+NOTIFIER_TASK: Optional[asyncio.Task] = None
+APP_LOOP: Optional[asyncio.AbstractEventLoop] = None
+_last_notify_mono: float = time.monotonic()
+_last_notify_values: Optional[Tuple[float, float, float, float]] = None
+
+# -----------------------------
+# Metrics (simple Prometheus-like text output)
+# -----------------------------
+HTTP_RPC_METHODS = defaultdict(int)
+HTTP_RPC_ERRORS = defaultdict(int)
+WS_NOTIFY_TOTAL = 0
+WS_RPC_MESSAGES = 0
+UDP_PACKETS_TOTAL = 0
+UDP_REPLIES_TOTAL = 0
+
+
+def _build_notify_status() -> str:
+    # Keep payload concise: include EM.GetStatus and timestamp
+    payload = {
+        "method": "NotifyStatus",
+        "params": {
+            "ts": now_ts(),
+            "em:0": VM.em_get_status({"id": 0}),
+        },
+    }
+    return json.dumps(payload, separators=(",", ":"))
+
+
+def _build_notify_full_status() -> str:
+    payload = {"method": "NotifyFullStatus", "params": VM.shelly_get_status({})}
+    return json.dumps(payload, separators=(",", ":"))
+
+
+async def _ws_notifier_worker():
+    global WS_QUEUE
+    assert WS_QUEUE is not None
+    while True:
+        msg = await WS_QUEUE.get()
+        stale: list[WebSocket] = []
+        for ws in list(WS_RPC_CLIENTS):
+            try:
+                await ws.send_text(msg)
+            except Exception:
+                stale.append(ws)
+        for ws in stale:
+            try:
+                WS_RPC_CLIENTS.discard(ws)
+            except Exception:
+                pass
+
+
+def _enqueue_ws_broadcast(msg: str):
+    global APP_LOOP, WS_QUEUE
+    if APP_LOOP is None or WS_QUEUE is None:
+        return
+    try:
+        APP_LOOP.call_soon_threadsafe(WS_QUEUE.put_nowait, msg)
+    except Exception:
+        pass
 
 METHODS = {
     "Shelly.GetStatus": VM.shelly_get_status,
     "Shelly.GetDeviceInfo": VM.shelly_get_device_info,
     "Shelly.GetConfig": VM.shelly_get_config,
     "Shelly.SetConfig": VM.shelly_set_config,
+    "Shelly.ListMethods": lambda _params: sorted(list([] if False else [])),  # placeholder, replaced below
     "Shelly.Ping": VM.shelly_ping,
     "Shelly.Reboot": VM.shelly_reboot,
     "EM.GetStatus": VM.em_get_status,
@@ -330,8 +453,14 @@ METHODS = {
     "EMData.ResetCounters": VM.emdata_reset_counters,
     "MQTT.GetConfig": VM.mqtt_get_config,
     "MQTT.SetConfig": VM.mqtt_set_config,
+    "MQTT.Status": VM.mqtt_status,
     "Sys.GetStatus": VM.sys_get_status,
+    "Sys.GetInfo": VM.sys_get_info,
+    "Sys.SetConfig": VM.sys_set_config,
 }
+
+# Fill Shelly.ListMethods now that METHODS exists
+METHODS["Shelly.ListMethods"] = lambda _params: sorted(METHODS.keys())
 
 def _handle_rpc_call(req: Dict[str, Any]) -> Dict[str, Any]:
     rid = req.get("id")
@@ -363,19 +492,56 @@ def _rpc_response_bytes(data: bytes) -> bytes:
 @app.post("/rpc")
 async def rpc_endpoint(request: Request) -> JSONResponse:
     body = await request.json()
+    try:
+        if isinstance(body, dict):
+            log.info("HTTP POST /rpc method=%s", body.get("method"))
+            if isinstance(body, dict) and body.get("method"):
+                HTTP_RPC_METHODS[body.get("method")] += 1
+        else:
+            log.info("HTTP POST /rpc batch size=%d", len(body) if isinstance(body, list) else 1)
+    except Exception:
+        pass
     if isinstance(body, list):
-        resp = [_handle_rpc_call(item) for item in body]
+        resp = []
+        for item in body:
+            r = _handle_rpc_call(item)
+            if isinstance(item, dict) and item.get("method") and "error" in r:
+                HTTP_RPC_ERRORS[item.get("method")] += 1
+            resp.append(r)
         return JSONResponse(resp)
     else:
-        return JSONResponse(_handle_rpc_call(body))
+        r = _handle_rpc_call(body)
+        if isinstance(body, dict) and body.get("method") and "error" in r:
+            HTTP_RPC_ERRORS[body.get("method")] += 1
+        return JSONResponse(r)
 
 @app.get("/rpc")
 async def rpc_get(request: Request) -> JSONResponse:
     # Support GET-style RPC: /rpc?method=EM.GetStatus&id=0 or /rpc?method=Shelly.GetConfig
     qp = dict(request.query_params)
+    # Batch GET support via ?batch=[{...},{...}]
+    if "batch" in qp:
+        try:
+            batch = json.loads(qp["batch"]) or []
+            if not isinstance(batch, list):
+                raise ValueError
+        except Exception:
+            return JSONResponse({"error": "invalid batch"}, status_code=400)
+        results = []
+        for item in batch:
+            if not isinstance(item, dict):
+                continue
+            res = _handle_rpc_call(item)
+            results.append(res.get("result", res))
+        return JSONResponse(results)
     method = qp.pop("method", None)
     if not method:
         return JSONResponse({"error": "method required"}, status_code=400)
+    try:
+        log.info("HTTP GET /rpc method=%s", method)
+        HTTP_RPC_METHODS[method] += 1
+    except Exception:
+        pass
     # Build params: prefer explicit JSON in 'params', else use remaining query items
     params: Dict[str, Any] = {}
     if "params" in qp:
@@ -406,6 +572,25 @@ async def rpc_get(request: Request) -> JSONResponse:
 async def rpc_get_method(method: str, request: Request) -> JSONResponse:
     # Support GET-style RPC: /rpc/EM.GetStatus?id=0
     qp = dict(request.query_params)
+    if "batch" in qp:
+        try:
+            batch = json.loads(qp["batch"]) or []
+            if not isinstance(batch, list):
+                raise ValueError
+        except Exception:
+            return JSONResponse({"error": "invalid batch"}, status_code=400)
+        results = []
+        for params in batch:
+            if not isinstance(params, dict):
+                continue
+            res = _handle_rpc_call({"id": None, "method": method, "params": params})
+            results.append(res.get("result", res))
+        return JSONResponse(results)
+    try:
+        log.info("HTTP GET /rpc/%s", method)
+        HTTP_RPC_METHODS[method] += 1
+    except Exception:
+        pass
     params: Dict[str, Any] = {}
     if "params" in qp:
         try:
@@ -432,6 +617,39 @@ async def rpc_get_method(method: str, request: Request) -> JSONResponse:
 def healthz():
     return {"status": "ok", "ts": now_ts(), "device": DEVICE_ID}
 
+@app.get("/metrics")
+def metrics():
+    lines = []
+    # HTTP
+    total_http = sum(HTTP_RPC_METHODS.values())
+    lines.append("# HELP virtual_shelly_http_rpc_requests_total Total HTTP RPC requests")
+    lines.append("# TYPE virtual_shelly_http_rpc_requests_total counter")
+    lines.append(f"virtual_shelly_http_rpc_requests_total {total_http}")
+    for m, v in HTTP_RPC_METHODS.items():
+        lines.append(f'virtual_shelly_http_rpc_requests_total{{method="{m}"}} {v}')
+    lines.append("# HELP virtual_shelly_http_rpc_errors_total Total HTTP RPC errors")
+    lines.append("# TYPE virtual_shelly_http_rpc_errors_total counter")
+    for m, v in HTTP_RPC_ERRORS.items():
+        lines.append(f'virtual_shelly_http_rpc_errors_total{{method="{m}"}} {v}')
+    # WS
+    lines.append("# HELP virtual_shelly_ws_rpc_messages_total Total WS RPC messages received")
+    lines.append("# TYPE virtual_shelly_ws_rpc_messages_total counter")
+    lines.append(f"virtual_shelly_ws_rpc_messages_total {WS_RPC_MESSAGES}")
+    lines.append("# HELP virtual_shelly_ws_notify_total Total WS Notify messages sent")
+    lines.append("# TYPE virtual_shelly_ws_notify_total counter")
+    lines.append(f"virtual_shelly_ws_notify_total {WS_NOTIFY_TOTAL}")
+    lines.append("# HELP virtual_shelly_ws_clients Current WS client connections")
+    lines.append("# TYPE virtual_shelly_ws_clients gauge")
+    lines.append(f"virtual_shelly_ws_clients {len(WS_RPC_CLIENTS)}")
+    # UDP
+    lines.append("# HELP virtual_shelly_udp_packets_total Total UDP packets received")
+    lines.append("# TYPE virtual_shelly_udp_packets_total counter")
+    lines.append(f"virtual_shelly_udp_packets_total {UDP_PACKETS_TOTAL}")
+    lines.append("# HELP virtual_shelly_udp_replies_total Total UDP replies sent")
+    lines.append("# TYPE virtual_shelly_udp_replies_total counter")
+    lines.append(f"virtual_shelly_udp_replies_total {UDP_REPLIES_TOTAL}")
+    return JSONResponse("\n".join(lines), media_type="text/plain")
+
 @app.get("/")
 def root():
     return {"service": "virtual-shelly-pro-3em", "rpc": "/rpc"}
@@ -444,6 +662,12 @@ def shelly_http_info():
         auth_enabled = bool(VM.config.get("rpc", {}).get("auth", False))
     except Exception:
         auth_enabled = False
+    # Link/discovery info (basic static flags for emulator)
+    link = {
+        "wifi_sta": {"connected": False},
+        "eth": {"connected": True},
+        "discoverable": True,
+    }
     return {
         "name": DEVICE_ID,
         "id": DEVICE_ID,
@@ -457,6 +681,8 @@ def shelly_http_info():
         "manufacturer": MANUFACTURER,
         "auth_en": auth_enabled,
         "auth_domain": None,
+        "uptime": int(time.monotonic()),
+        **link,
     }
 
 # -----------------------------
@@ -465,6 +691,38 @@ def shelly_http_info():
 def poll_loop():
     while True:
         VM.poll_home_assistant()
+        # Throttled WS notify broadcast
+        try:
+            global _last_notify_mono
+            global _last_notify_values
+            now_m = time.monotonic()
+            if (now_m - _last_notify_mono) >= WS_NOTIFY_INTERVAL:
+                # Coalesce: only broadcast if power changed beyond EPS
+                with VM.lock:
+                    a = VM.phases["a"].act_power or 0.0
+                    b = VM.phases["b"].act_power or 0.0
+                    c = VM.phases["c"].act_power or 0.0
+                total = a + b + c
+                current = (a, b, c, total)
+                changed = False
+                if _last_notify_values is None:
+                    changed = True
+                else:
+                    for old, new in zip(_last_notify_values, current):
+                        if abs((new or 0.0) - (old or 0.0)) >= WS_NOTIFY_EPS:
+                            changed = True
+                            break
+                if changed:
+                    _enqueue_ws_broadcast(_build_notify_status())
+                    try:
+                        global WS_NOTIFY_TOTAL
+                        WS_NOTIFY_TOTAL += 1
+                    except Exception:
+                        pass
+                    _last_notify_values = current
+                    _last_notify_mono = now_m
+        except Exception:
+            pass
         time.sleep(POLL_INTERVAL)
 threading.Thread(target=poll_loop, daemon=True).start()
 
@@ -472,23 +730,63 @@ threading.Thread(target=poll_loop, daemon=True).start()
 # WebSockets 6010–6022
 # -----------------------------
 async def ws_handler(websocket):
+    # Minimal handler for raw WS fan-out ports; no broadcast support.
     async for message in websocket:
-        # websockets expects str; our dispatcher returns bytes; convert.
         resp = _rpc_response_bytes(message.encode()).decode()
         await websocket.send(resp)
+
+@app.on_event("startup")
+async def _on_startup():
+    global WS_QUEUE, NOTIFIER_TASK, APP_LOOP
+    APP_LOOP = asyncio.get_running_loop()
+    WS_QUEUE = asyncio.Queue()
+    NOTIFIER_TASK = asyncio.create_task(_ws_notifier_worker())
+    log.info("Service startup: device_id=%s model=%s fw=%s http_port=%s", DEVICE_ID, MODEL, FIRMWARE, HTTP_PORT)
+
+
+@app.on_event("shutdown")
+async def _on_shutdown():
+    global NOTIFIER_TASK
+    if NOTIFIER_TASK:
+        try:
+            NOTIFIER_TASK.cancel()
+        except Exception:
+            pass
+
 
 @app.websocket("/rpc")
 async def ws_rpc(websocket: WebSocket):
     # WebSocket endpoint compatible with Shelly Gen2 ws://<ip>/rpc
     await websocket.accept()
+    WS_RPC_CLIENTS.add(websocket)
+    # Initial full status
+    try:
+        await websocket.send_text(_build_notify_full_status())
+        log.info("WS /rpc connected; clients=%d", len(WS_RPC_CLIENTS))
+    except Exception:
+        pass
     try:
         while True:
             message = await websocket.receive_text()
+            try:
+                global WS_RPC_MESSAGES
+                WS_RPC_MESSAGES += 1
+            except Exception:
+                pass
             resp = _rpc_response_bytes(message.encode()).decode()
             await websocket.send_text(resp)
     except Exception:
         try:
             await websocket.close()
+        except Exception:
+            pass
+    finally:
+        try:
+            WS_RPC_CLIENTS.discard(websocket)
+        except Exception:
+            pass
+        try:
+            log.info("WS /rpc disconnected; clients=%d", len(WS_RPC_CLIENTS))
         except Exception:
             pass
 
@@ -588,8 +886,24 @@ class RPCUDPProtocol(asyncio.DatagramProtocol):
         if len(data) > self.max_size:
             return
         try:
-            obj = json.loads(data.decode("utf-8", errors="ignore"))
+            text = data.decode("utf-8", errors="ignore")
+            obj = json.loads(text)
         except Exception:
+            return
+        try:
+            m = obj.get("method") if isinstance(obj, dict) else None
+            log.debug("UDP packet from %s method=%s", addr, m)
+            global UDP_PACKETS_TOTAL
+            UDP_PACKETS_TOTAL += 1
+        except Exception:
+            pass
+        # If payload is JSON-RPC 2.0, respond with JSON-RPC envelope
+        if isinstance(obj, (dict, list)) and (
+            (isinstance(obj, dict) and obj.get("jsonrpc") == "2.0") or
+            (isinstance(obj, list) and any(isinstance(x, dict) and x.get("jsonrpc") == "2.0" for x in obj))
+        ):
+            resp = _rpc_response_bytes(text.encode("utf-8"))
+            self.transport.sendto(resp, addr)
             return
         resp_obj = _udp_build_response(obj)
         if resp_obj is None:
@@ -597,6 +911,12 @@ class RPCUDPProtocol(asyncio.DatagramProtocol):
         # Compact separators to match b2500-meter
         payload = json.dumps(resp_obj, separators=(",", ":")).encode()
         self.transport.sendto(payload, addr)
+        try:
+            log.debug("UDP reply to %s method=%s bytes=%d", addr, obj.get("method"), len(payload))
+            global UDP_REPLIES_TOTAL
+            UDP_REPLIES_TOTAL += 1
+        except Exception:
+            pass
 
 async def start_udp_servers(ports: List[int], max_size: int):
     loop = asyncio.get_running_loop()
@@ -652,7 +972,10 @@ def start_mdns():
     ip = _get_ip_for_mdns()
     addr = socket.inet_aton(ip)
     instance = MDNS_HOSTNAME
-    zc = Zeroconf(interfaces=InterfaceChoice.All)
+    try:
+        zc = Zeroconf(interfaces=[ip] if MDNS_IP else InterfaceChoice.Default)
+    except Exception:
+        zc = Zeroconf(interfaces=InterfaceChoice.Default)
 
     txt = {
         "gen": "2",
@@ -680,10 +1003,56 @@ def start_mdns():
         server=f"{instance}.local.",
     )
     def _register():
-        zc.register_service(info_http)
-        zc.register_service(info_shelly)
+        # Register with explicit TTL (seconds)
+        try:
+            zc.register_service(info_http, ttl=120)
+            zc.register_service(info_shelly, ttl=120)
+        except TypeError:
+            # Older zeroconf without ttl param
+            zc.register_service(info_http)
+            zc.register_service(info_shelly)
+        current_ip = ip
         while True:
-            time.sleep(3600)
+            time.sleep(60)
+            try:
+                new_ip = _get_ip_for_mdns()
+                if new_ip != current_ip:
+                    new_addr = socket.inet_aton(new_ip)
+                    info_http.addresses = [new_addr]
+                    info_shelly.addresses = [new_addr]
+                    try:
+                        zc.update_service(info_http)
+                        zc.update_service(info_shelly)
+                    except Exception:
+                        # Fallback: unregister and register again
+                        try:
+                            zc.unregister_service(info_http)
+                            zc.unregister_service(info_shelly)
+                        except Exception:
+                            pass
+                        try:
+                            zc.register_service(info_http)
+                            zc.register_service(info_shelly)
+                        except Exception:
+                            pass
+                    current_ip = new_ip
+            except Exception:
+                pass
     threading.Thread(target=_register, daemon=True).start()
 
 start_mdns()
+
+# -----------------------------
+# Graceful shutdown: persist energy on SIGTERM/SIGINT
+# -----------------------------
+def _handle_term(signum, frame):
+    try:
+        VM.persist()
+    except Exception:
+        pass
+
+try:
+    signal.signal(signal.SIGTERM, _handle_term)
+    signal.signal(signal.SIGINT, _handle_term)
+except Exception:
+    pass

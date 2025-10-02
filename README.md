@@ -15,11 +15,13 @@ Features
 - WebSockets:
   - WS `/rpc`: JSON‑RPC over WebSocket (common for Shelly Gen2).
   - Fan‑out WS servers on TCP ports 6010–6022 echoing RPC responses (configurable).
+  - On `/rpc` connect: sends `NotifyFullStatus`; then periodic `NotifyStatus` broadcasts (throttled by `WS_NOTIFY_INTERVAL`).
 - UDP RPC (Shelly‑style, compatible with tomquist/b2500‑meter):
   - Supports `EM.GetStatus` (3‑phase) and `EM1.GetStatus` (single total) with identical rounding/decimal behavior.
   - Listens on configurable UDP ports (defaults include 1010 and 2220).
 - mDNS service advertisements (`_http._tcp` and `_shelly._tcp`) for discovery.
 - Energy counters integrated from power over time and persisted at `/data/state.json` (via Docker volume).
+ - Simple `/metrics` endpoint with Prometheus‑style counters for HTTP/WS/UDP events.
 
 Quick Start (Docker Compose)
 
@@ -48,8 +50,12 @@ Configuration (env vars)
 - Device identity
   - `DEVICE_ID`, `MODEL` (default `ShellyPro3EM`), `FIRMWARE`, `MAC`, `SN`, `MANUFACTURER`
 - HTTP/WebSocket
-  - `HTTP_PORT`: used in mDNS TXT/adverts only. Uvicorn listens on port 80 by default in the container.
+  - `HTTP_PORT`: container listens on this port and advertises it via mDNS (default `80`).
   - `WS_PORT_START`, `WS_PORT_END`: WS fan‑out TCP range (default 6010–6022)
+  - `WS_NOTIFY_INTERVAL`: throttle seconds for WS `/rpc` `NotifyStatus` (default `2.0`).
+  - `WS_NOTIFY_EPS`: coalescing threshold in watts; only broadcast when change ≥ EPS (default `0.1`).
+  - `CORS_ENABLE`: enable CORS middleware (`true|false`, default `false`).
+  - `CORS_ORIGINS`: comma‑separated allowed origins (default `*`).
 - UDP RPC
   - `UDP_PORTS`: comma‑separated list (e.g. `1010,2220`) for old/new Shelly Pro 3EM styles
   - `UDP_MAX`: max UDP payload size (bytes)
@@ -72,11 +78,13 @@ APIs
   - Response is the method result object, e.g. `{ "a_act_power": 123.4, ... }`
 - WebSocket RPC:
   - Connect `ws://<ip>/rpc` and send the same JSON‑RPC envelopes as POST `/rpc`.
+  - On connect you’ll receive a `NotifyFullStatus`; during operation `NotifyStatus` messages are broadcast.
 - Shelly‑style UDP RPC (b2500 compatible):
   - Send to UDP port `1010` or `2220` (configurable via `UDP_PORTS`)
   - Request (example): `{"id":1,"src":"cli","method":"EM.GetStatus","params":{"id":0}}`
   - Response (example): `{"id":1,"src":"<DEVICE_ID>","dst":"unknown","result":{"a_act_power":X.X,"b_act_power":Y.Y,"c_act_power":Z.Z,"total_act_power":T.TTT}}`
   - Also supports `EM1.GetStatus` -> `{ "result": { "act_power": T.TTT } }`
+  - If payload includes `"jsonrpc":"2.0"`, responds with JSON‑RPC envelope (fallback handler).
 
 Example Commands
 
@@ -107,7 +115,8 @@ Shelly app notes
 
 Troubleshooting
 
-- Check health: `curl http://<ip>/healthz`
+- Check health: `curl http://<ip>/healthz` (image includes a Docker HEALTHCHECK)
+ - Inspect metrics: `curl http://<ip>/metrics`
 - Inspect logs: `docker logs -f shelly3em-virtual`
 - Verify endpoints hit by the app (look for GET /shelly, /rpc calls, WS /rpc handshakes).
 - Confirm UDP replies with netcat; try both 1010 and 2220 depending on your consumer.

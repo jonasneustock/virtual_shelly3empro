@@ -17,4 +17,8 @@ EXPOSE 1010/udp
 EXPOSE 2220/udp
 EXPOSE 5353/udp
 
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "80"]
+# Use HTTP_PORT if provided, default to 80
+ENV HTTP_PORT=80
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD ["python","-c","import os,sys,urllib.request; url='http://127.0.0.1:%s/healthz'%os.environ.get('HTTP_PORT','80'); sys.exit(0 if urllib.request.urlopen(url, timeout=3).status==200 else 1)"]
+
+CMD ["/bin/sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${HTTP_PORT:-80}"]
