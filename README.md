@@ -9,6 +9,7 @@ Features
 
 - HTTP API (FastAPI + Uvicorn) with:
   - GET `/shelly`: Gen2 device info (id, app, ver, model, gen, mac, sn, auth flags).
+  - GET `/ecotracker`, `/ecotracker/status`, `/ecotracker/counters`: EcoTracker-friendly snapshots and counters.
   - POST `/rpc`: JSON‑RPC 2.0 envelope for Shelly.* and EM*/EMData* methods.
   - GET `/rpc?method=...` and GET `/rpc/{method}`: returns the method result directly (no envelope), matching Shelly GET semantics.
   - GET `/healthz` and GET `/`: simple health and info.
@@ -92,6 +93,9 @@ APIs
   - `/rpc?method=EM.GetStatus&id=0`
   - `/rpc/EM.GetStatus?id=0`
   - Response is the method result object, e.g. `{ "a_act_power": 123.4, ... }`
+- EcoTracker helpers:
+  - `/ecotracker/status` → `EcoTracker.GetStatus`
+  - `/ecotracker/counters` → `EcoTracker.GetCounters`
 - WebSocket RPC:
   - Connect `ws://<ip>/rpc` and send the same JSON‑RPC envelopes as POST `/rpc`.
   - On connect you’ll receive a `NotifyFullStatus`; during operation `NotifyStatus` messages are broadcast.
@@ -106,6 +110,7 @@ Example Commands
 
 - HTTP GET:
   - `curl http://<ip>/shelly`
+  - `curl http://<ip>/ecotracker/status`
   - `curl "http://<ip>/rpc/EM.GetStatus?id=0"`
 - HTTP POST JSON‑RPC:
   - `curl -s http://<ip>/rpc -H 'Content-Type: application/json' -d '{"id":1,"method":"EM.GetStatus","params":{"id":0}}'`
