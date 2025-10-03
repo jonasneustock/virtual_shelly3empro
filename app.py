@@ -709,7 +709,7 @@ def _active_request_ip_count() -> int:
 
 def _apply_request_side_power_scaling(powers: Tuple[float, float, float]) -> Tuple[float, float, float]:
     total = sum(powers)
-    if total <= 0:
+    if total == 0:
         return powers
     count = max(1, _active_request_ip_count())
     if count <= 1:
