@@ -259,14 +259,20 @@ class VirtualPro3EM:
             raise ValueError("invalid id")
         with self.lock:
             a, b, c = self.phases["a"], self.phases["b"], self.phases["c"]
-            total_w = (a.act_power or 0.0) + (b.act_power or 0.0) + (c.act_power or 0.0)
+            raw_powers = (
+                float(a.act_power or 0.0),
+                float(b.act_power or 0.0),
+                float(c.act_power or 0.0),
+            )
+            a_power, b_power, c_power = _apply_request_side_power_scaling(raw_powers)
+            total_w = a_power + b_power + c_power
 
             if STRICT_MINIMAL_PAYLOAD:
                 # Minimal contract: only the 4 power keys some gateways require
                 return {
-                    "a_act_power": round(a.act_power, 2),
-                    "b_act_power": round(b.act_power, 2),
-                    "c_act_power": round(c.act_power, 2),
+                    "a_act_power": round(a_power, 2),
+                    "b_act_power": round(b_power, 2),
+                    "c_act_power": round(c_power, 2),
                     "total_act_power": round(total_w, 2),
                 }
 
@@ -279,9 +285,9 @@ class VirtualPro3EM:
                 "a_current": a.current if a.current is not None else 0.0,
                 "b_current": b.current if b.current is not None else 0.0,
                 "c_current": c.current if c.current is not None else 0.0,
-                "a_act_power": round(a.act_power, 2),
-                "b_act_power": round(b.act_power, 2),
-                "c_act_power": round(c.act_power, 2),
+                "a_act_power": round(a_power, 2),
+                "b_act_power": round(b_power, 2),
+                "c_act_power": round(c_power, 2),
                 "a_pf": a.pf if a.pf is not None else 1.0,
                 "b_pf": b.pf if b.pf is not None else 1.0,
                 "c_pf": c.pf if c.pf is not None else 1.0,
@@ -478,10 +484,16 @@ class ShellyModbusBridge:
             self._write_pair(regs, 3012, _pack_register_pair(phases["b"].current or 0.0, ">f"))
             self._write_pair(regs, 3014, _pack_register_pair(phases["c"].current or 0.0, ">f"))
 
-            total_power = (phases["a"].act_power or 0.0) + (phases["b"].act_power or 0.0) + (phases["c"].act_power or 0.0)
-            self._write_pair(regs, 3020, _pack_register_pair(phases["a"].act_power, ">f"))
-            self._write_pair(regs, 3022, _pack_register_pair(phases["b"].act_power, ">f"))
-            self._write_pair(regs, 3024, _pack_register_pair(phases["c"].act_power, ">f"))
+            raw_powers = (
+                float(phases["a"].act_power or 0.0),
+                float(phases["b"].act_power or 0.0),
+                float(phases["c"].act_power or 0.0),
+            )
+            a_power, b_power, c_power = _apply_request_side_power_scaling(raw_powers)
+            total_power = a_power + b_power + c_power
+            self._write_pair(regs, 3020, _pack_register_pair(a_power, ">f"))
+            self._write_pair(regs, 3022, _pack_register_pair(b_power, ">f"))
+            self._write_pair(regs, 3024, _pack_register_pair(c_power, ">f"))
             self._write_pair(regs, 3026, _pack_register_pair(total_power, ">f"))
 
             self._write_pair(regs, 3030, _pack_register_pair(phases["a"].pf if phases["a"].pf is not None else 1.0, ">f"))
@@ -646,6 +658,46 @@ WS_RPC_MESSAGES = 0
 UDP_PACKETS_TOTAL = 0
 UDP_REPLIES_TOTAL = 0
 
+try:
+    REQUEST_IP_TTL = float(os.getenv("REQUEST_IP_TTL", "30.0"))
+except ValueError:
+    REQUEST_IP_TTL = 30.0
+
+_REQUEST_IP_LOCK = threading.RLock()
+_REQUEST_IP_SEEN: Dict[str, float] = {}
+
+
+def _register_request_ip(addr: Optional[str]) -> None:
+    if not addr:
+        return
+    now = time.monotonic()
+    cutoff = now - REQUEST_IP_TTL
+    with _REQUEST_IP_LOCK:
+        _REQUEST_IP_SEEN[addr] = now
+        stale = [ip for ip, ts in _REQUEST_IP_SEEN.items() if ts < cutoff]
+        for ip in stale:
+            _REQUEST_IP_SEEN.pop(ip, None)
+
+
+def _active_request_ip_count() -> int:
+    now = time.monotonic()
+    cutoff = now - REQUEST_IP_TTL
+    with _REQUEST_IP_LOCK:
+        stale = [ip for ip, ts in _REQUEST_IP_SEEN.items() if ts < cutoff]
+        for ip in stale:
+            _REQUEST_IP_SEEN.pop(ip, None)
+        return len(_REQUEST_IP_SEEN)
+
+
+def _apply_request_side_power_scaling(powers: Tuple[float, float, float]) -> Tuple[float, float, float]:
+    total = sum(powers)
+    if total <= 0:
+        return powers
+    count = max(1, _active_request_ip_count())
+    if count <= 1:
+        return powers
+    return tuple(p / count for p in powers)
+
 
 def _build_notify_status() -> str:
     # Keep payload concise: include EM.GetStatus and timestamp
@@ -742,6 +794,8 @@ def _rpc_response_bytes(data: bytes) -> bytes:
 # -----------------------------
 @app.post("/rpc")
 async def rpc_endpoint(request: Request) -> JSONResponse:
+    client_host = getattr(request.client, "host", None) if request.client else None
+    _register_request_ip(client_host)
     body = await request.json()
     try:
         if isinstance(body, dict):
@@ -769,6 +823,8 @@ async def rpc_endpoint(request: Request) -> JSONResponse:
 @app.get("/rpc")
 async def rpc_get(request: Request) -> JSONResponse:
     # Support GET-style RPC: /rpc?method=EM.GetStatus&id=0 or /rpc?method=Shelly.GetConfig
+    client_host = getattr(request.client, "host", None) if request.client else None
+    _register_request_ip(client_host)
     qp = dict(request.query_params)
     # Batch GET support via ?batch=[{...},{...}]
     if "batch" in qp:
@@ -822,6 +878,8 @@ async def rpc_get(request: Request) -> JSONResponse:
 @app.get("/rpc/{method}")
 async def rpc_get_method(method: str, request: Request) -> JSONResponse:
     # Support GET-style RPC: /rpc/EM.GetStatus?id=0
+    client_host = getattr(request.client, "host", None) if request.client else None
+    _register_request_ip(client_host)
     qp = dict(request.query_params)
     if "batch" in qp:
         try:
@@ -984,7 +1042,16 @@ threading.Thread(target=poll_loop, daemon=True).start()
 # -----------------------------
 async def ws_handler(websocket):
     # Minimal handler for raw WS fan-out ports; no broadcast support.
+    remote = None
+    try:
+        addr = getattr(websocket, "remote_address", None)
+        if isinstance(addr, tuple) and addr:
+            remote = addr[0]
+    except Exception:
+        remote = None
+    _register_request_ip(remote)
     async for message in websocket:
+        _register_request_ip(remote)
         resp = _rpc_response_bytes(message.encode()).decode()
         await websocket.send(resp)
 
@@ -1010,6 +1077,9 @@ async def _on_shutdown():
 @app.websocket("/rpc")
 async def ws_rpc(websocket: WebSocket):
     # WebSocket endpoint compatible with Shelly Gen2 ws://<ip>/rpc
+    client = getattr(websocket, "client", None)
+    host = getattr(client, "host", None) if client else None
+    _register_request_ip(host)
     await websocket.accept()
     WS_RPC_CLIENTS.add(websocket)
     # Initial full status
@@ -1026,6 +1096,7 @@ async def ws_rpc(websocket: WebSocket):
                 WS_RPC_MESSAGES += 1
             except Exception:
                 pass
+            _register_request_ip(host)
             resp = _rpc_response_bytes(message.encode()).decode()
             await websocket.send_text(resp)
     except Exception:
@@ -1083,15 +1154,16 @@ def _udp_build_response(obj: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
     if method == "EM.GetStatus":
         with VM.lock:
-            powers = [
-                VM.phases["a"].act_power or 0.0,
-                VM.phases["b"].act_power or 0.0,
-                VM.phases["c"].act_power or 0.0,
-            ]
-        a = _udp_decimal_enforcer(powers[0])
-        b = _udp_decimal_enforcer(powers[1])
-        c = _udp_decimal_enforcer(powers[2])
-        total = round(sum(powers), 3)
+            raw_powers = (
+                float(VM.phases["a"].act_power or 0.0),
+                float(VM.phases["b"].act_power or 0.0),
+                float(VM.phases["c"].act_power or 0.0),
+            )
+        scaled = _apply_request_side_power_scaling(raw_powers)
+        a = _udp_decimal_enforcer(scaled[0])
+        b = _udp_decimal_enforcer(scaled[1])
+        c = _udp_decimal_enforcer(scaled[2])
+        total = round(sum(scaled), 3)
         if total == round(total) or total == 0:
             total = total + 0.001
         return {
@@ -1107,12 +1179,13 @@ def _udp_build_response(obj: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         }
     elif method == "EM1.GetStatus":
         with VM.lock:
-            powers = [
-                VM.phases["a"].act_power or 0.0,
-                VM.phases["b"].act_power or 0.0,
-                VM.phases["c"].act_power or 0.0,
-            ]
-        total = round(sum(powers), 3)
+            raw_powers = (
+                float(VM.phases["a"].act_power or 0.0),
+                float(VM.phases["b"].act_power or 0.0),
+                float(VM.phases["c"].act_power or 0.0),
+            )
+        scaled = _apply_request_side_power_scaling(raw_powers)
+        total = round(sum(scaled), 3)
         if total == round(total) or total == 0:
             total = total + 0.001
         return {
@@ -1138,6 +1211,11 @@ class RPCUDPProtocol(asyncio.DatagramProtocol):
         # Enforce max payload; ignore oversize like b2500-meter (no JSON-RPC errors)
         if len(data) > self.max_size:
             return
+        try:
+            host = addr[0] if isinstance(addr, tuple) else None
+        except Exception:
+            host = None
+        _register_request_ip(host)
         try:
             text = data.decode("utf-8", errors="ignore")
             obj = json.loads(text)
