@@ -134,6 +134,47 @@ _SMOOTHING_LOCK = threading.RLock()
 _SMOOTHING_BUFFERS: Dict[str, Deque[float]] = defaultdict(lambda: deque(maxlen=HA_SMOOTHING_WINDOW))
 
 
+try:
+    REQUEST_IP_TTL = float(os.getenv("REQUEST_IP_TTL", "30.0"))
+except ValueError:
+    REQUEST_IP_TTL = 30.0
+
+_REQUEST_IP_LOCK = threading.RLock()
+_REQUEST_IP_SEEN: Dict[str, float] = {}
+
+
+def _register_request_ip(addr: Optional[str]) -> None:
+    if not addr:
+        return
+    now = time.monotonic()
+    cutoff = now - REQUEST_IP_TTL
+    with _REQUEST_IP_LOCK:
+        _REQUEST_IP_SEEN[addr] = now
+        stale = [ip for ip, ts in _REQUEST_IP_SEEN.items() if ts < cutoff]
+        for ip in stale:
+            _REQUEST_IP_SEEN.pop(ip, None)
+
+
+def _active_request_ip_count() -> int:
+    now = time.monotonic()
+    cutoff = now - REQUEST_IP_TTL
+    with _REQUEST_IP_LOCK:
+        stale = [ip for ip, ts in _REQUEST_IP_SEEN.items() if ts < cutoff]
+        for ip in stale:
+            _REQUEST_IP_SEEN.pop(ip, None)
+        return len(_REQUEST_IP_SEEN)
+
+
+def _apply_request_side_power_scaling(powers: Tuple[float, float, float]) -> Tuple[float, float, float]:
+    total = sum(powers)
+    if total == 0:
+        return powers
+    count = max(1, _active_request_ip_count())
+    if count <= 1:
+        return powers
+    return tuple(p / count for p in powers)
+
+
 def _smooth_value(entity_id: str, value: float) -> float:
     with _SMOOTHING_LOCK:
         buf = _SMOOTHING_BUFFERS[entity_id]
@@ -675,47 +716,6 @@ WS_NOTIFY_TOTAL = 0
 WS_RPC_MESSAGES = 0
 UDP_PACKETS_TOTAL = 0
 UDP_REPLIES_TOTAL = 0
-
-try:
-    REQUEST_IP_TTL = float(os.getenv("REQUEST_IP_TTL", "30.0"))
-except ValueError:
-    REQUEST_IP_TTL = 30.0
-
-_REQUEST_IP_LOCK = threading.RLock()
-_REQUEST_IP_SEEN: Dict[str, float] = {}
-
-
-def _register_request_ip(addr: Optional[str]) -> None:
-    if not addr:
-        return
-    now = time.monotonic()
-    cutoff = now - REQUEST_IP_TTL
-    with _REQUEST_IP_LOCK:
-        _REQUEST_IP_SEEN[addr] = now
-        stale = [ip for ip, ts in _REQUEST_IP_SEEN.items() if ts < cutoff]
-        for ip in stale:
-            _REQUEST_IP_SEEN.pop(ip, None)
-
-
-def _active_request_ip_count() -> int:
-    now = time.monotonic()
-    cutoff = now - REQUEST_IP_TTL
-    with _REQUEST_IP_LOCK:
-        stale = [ip for ip, ts in _REQUEST_IP_SEEN.items() if ts < cutoff]
-        for ip in stale:
-            _REQUEST_IP_SEEN.pop(ip, None)
-        return len(_REQUEST_IP_SEEN)
-
-
-def _apply_request_side_power_scaling(powers: Tuple[float, float, float]) -> Tuple[float, float, float]:
-    total = sum(powers)
-    if total == 0:
-        return powers
-    count = max(1, _active_request_ip_count())
-    if count <= 1:
-        return powers
-    return tuple(p / count for p in powers)
-
 
 def _build_notify_status() -> str:
     # Keep payload concise: include EM.GetStatus and timestamp
@@ -1354,27 +1354,30 @@ def start_mdns():
         ),
     ]
 
+    info_http, info_shelly = services[:2]
+    info_modbus: Optional[ServiceInfo] = None
+
     if MODBUS_ENABLE:
-        services.append(
-            ServiceInfo(
-                "_modbus._tcp.local.",
-                f"{instance}._modbus._tcp.local.",
-                addresses=[addr],
-                port=MODBUS_PORT,
-                properties={k.encode(): v.encode() for k, v in txt.items()},
-                server=f"{instance}.local.",
-            )
+        info_modbus = ServiceInfo(
+            "_modbus._tcp.local.",
+            f"{instance}._modbus._tcp.local.",
+            addresses=[addr],
+            port=MODBUS_PORT,
+            properties={k.encode(): v.encode() for k, v in txt.items()},
+            server=f"{instance}.local.",
         )
+
+    managed_services = [svc for svc in (info_http, info_shelly, info_modbus) if svc is not None]
 
     def _register():
         # Register with explicit TTL (seconds)
         try:
-            zc.register_service(info_http, ttl=120)
-            zc.register_service(info_shelly, ttl=120)
+            for svc in managed_services:
+                zc.register_service(svc, ttl=120)
         except TypeError:
             # Older zeroconf without ttl param
-            zc.register_service(info_http)
-            zc.register_service(info_shelly)
+            for svc in managed_services:
+                zc.register_service(svc)
         current_ip = ip
         while True:
             time.sleep(60)
@@ -1382,21 +1385,21 @@ def start_mdns():
                 new_ip = _get_ip_for_mdns()
                 if new_ip != current_ip:
                     new_addr = socket.inet_aton(new_ip)
-                    info_http.addresses = [new_addr]
-                    info_shelly.addresses = [new_addr]
+                    for svc in managed_services:
+                        svc.addresses = [new_addr]
                     try:
-                        zc.update_service(info_http)
-                        zc.update_service(info_shelly)
+                        for svc in managed_services:
+                            zc.update_service(svc)
                     except Exception:
                         # Fallback: unregister and register again
                         try:
-                            zc.unregister_service(info_http)
-                            zc.unregister_service(info_shelly)
+                            for svc in managed_services:
+                                zc.unregister_service(svc)
                         except Exception:
                             pass
                         try:
-                            zc.register_service(info_http)
-                            zc.register_service(info_shelly)
+                            for svc in managed_services:
+                                zc.register_service(svc)
                         except Exception:
                             pass
                     current_ip = new_ip
