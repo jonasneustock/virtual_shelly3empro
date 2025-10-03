@@ -8,8 +8,8 @@ import logging
 import struct
 import signal
 from datetime import datetime, timezone
-from typing import Dict, Any, Optional, List, Tuple
-from collections import defaultdict
+from typing import Dict, Any, Optional, List, Tuple, Deque
+from collections import defaultdict, deque
 
 import requests
 from fastapi import FastAPI, Request, WebSocket
@@ -41,6 +41,8 @@ from pydantic import BaseModel
 HA_BASE_URL = os.getenv("HA_BASE_URL", "http://homeassistant:8123")
 HA_TOKEN = os.getenv("HA_TOKEN", "")
 POLL_INTERVAL = float(os.getenv("POLL_INTERVAL", "2.0"))
+HA_SMOOTHING_ENABLE = os.getenv("HA_SMOOTHING_ENABLE", "false").lower() in ("1", "true", "yes")
+HA_SMOOTHING_WINDOW = 5
 
 A_POWER = os.getenv("A_POWER", "sensor.phase_a_power")
 B_POWER = os.getenv("B_POWER", "sensor.phase_b_power")
@@ -120,9 +122,25 @@ def ha_get(entity_id: str) -> Optional[float]:
         raw = data.get("state")
         if raw in (None, "unknown", "unavailable", ""):
             return None
-        return float(raw)
+        value = float(raw)
+        if HA_SMOOTHING_ENABLE:
+            value = _smooth_value(entity_id, value)
+        return value
     except Exception:
         return None
+
+
+_SMOOTHING_LOCK = threading.RLock()
+_SMOOTHING_BUFFERS: Dict[str, Deque[float]] = defaultdict(lambda: deque(maxlen=HA_SMOOTHING_WINDOW))
+
+
+def _smooth_value(entity_id: str, value: float) -> float:
+    with _SMOOTHING_LOCK:
+        buf = _SMOOTHING_BUFFERS[entity_id]
+        buf.append(value)
+        if not buf:
+            return value
+        return sum(buf) / len(buf)
 
 def now_ts() -> int:
     return int(time.time())
