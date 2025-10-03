@@ -50,6 +50,7 @@ Configuration (env vars)
   - `HA_BASE_URL`: e.g. `http://homeassistant:8123` or `http://192.168.x.x:8123`
   - `HA_TOKEN`: HA Long‑Lived Access Token (read‑only)
   - `POLL_INTERVAL`: seconds between polls (default 2.0)
+  - `HA_SMOOTHING_ENABLE`: when `true`, average each sensor reading over the last 5 values
   - Entity IDs (override as needed): `A_POWER`, `B_POWER`, `C_POWER`, `A_VOLT`, `B_VOLT`, `C_VOLT`, `A_CURR`, `B_CURR`, `C_CURR`, `A_PF`, `B_PF`, `C_PF`
 - Device identity
   - `DEVICE_ID`: Device identifier reported in RPC/mDNS (default `shellypro3em-virtual-001`)
