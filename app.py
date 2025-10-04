@@ -8,7 +8,7 @@ import logging
 import struct
 import signal
 from datetime import datetime, timezone
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, List, Tuple, Deque
 from collections import defaultdict, deque
 
 import requests
@@ -41,6 +41,8 @@ from pydantic import BaseModel
 HA_BASE_URL = os.getenv("HA_BASE_URL", "http://homeassistant:8123")
 HA_TOKEN = os.getenv("HA_TOKEN", "")
 POLL_INTERVAL = float(os.getenv("POLL_INTERVAL", "2.0"))
+HA_SMOOTHING_ENABLE = os.getenv("HA_SMOOTHING_ENABLE", "false").lower() in ("1", "true", "yes")
+HA_SMOOTHING_WINDOW = 5
 
 A_POWER = os.getenv("A_POWER", "sensor.phase_a_power")
 B_POWER = os.getenv("B_POWER", "sensor.phase_b_power")
@@ -120,9 +122,66 @@ def ha_get(entity_id: str) -> Optional[float]:
         raw = data.get("state")
         if raw in (None, "unknown", "unavailable", ""):
             return None
-        return float(raw)
+        value = float(raw)
+        if HA_SMOOTHING_ENABLE:
+            value = _smooth_value(entity_id, value)
+        return value
     except Exception:
         return None
+
+
+_SMOOTHING_LOCK = threading.RLock()
+_SMOOTHING_BUFFERS: Dict[str, Deque[float]] = defaultdict(lambda: deque(maxlen=HA_SMOOTHING_WINDOW))
+
+
+try:
+    REQUEST_IP_TTL = float(os.getenv("REQUEST_IP_TTL", "30.0"))
+except ValueError:
+    REQUEST_IP_TTL = 30.0
+
+_REQUEST_IP_LOCK = threading.RLock()
+_REQUEST_IP_SEEN: Dict[str, float] = {}
+
+
+def _register_request_ip(addr: Optional[str]) -> None:
+    if not addr:
+        return
+    now = time.monotonic()
+    cutoff = now - REQUEST_IP_TTL
+    with _REQUEST_IP_LOCK:
+        _REQUEST_IP_SEEN[addr] = now
+        stale = [ip for ip, ts in _REQUEST_IP_SEEN.items() if ts < cutoff]
+        for ip in stale:
+            _REQUEST_IP_SEEN.pop(ip, None)
+
+
+def _active_request_ip_count() -> int:
+    now = time.monotonic()
+    cutoff = now - REQUEST_IP_TTL
+    with _REQUEST_IP_LOCK:
+        stale = [ip for ip, ts in _REQUEST_IP_SEEN.items() if ts < cutoff]
+        for ip in stale:
+            _REQUEST_IP_SEEN.pop(ip, None)
+        return len(_REQUEST_IP_SEEN)
+
+
+def _apply_request_side_power_scaling(powers: Tuple[float, float, float]) -> Tuple[float, float, float]:
+    total = sum(powers)
+    if total == 0:
+        return powers
+    count = max(1, _active_request_ip_count())
+    if count <= 1:
+        return powers
+    return tuple(p / count for p in powers)
+
+
+def _smooth_value(entity_id: str, value: float) -> float:
+    with _SMOOTHING_LOCK:
+        buf = _SMOOTHING_BUFFERS[entity_id]
+        buf.append(value)
+        if not buf:
+            return value
+        return sum(buf) / len(buf)
 
 def now_ts() -> int:
     return int(time.time())
@@ -259,14 +318,20 @@ class VirtualPro3EM:
             raise ValueError("invalid id")
         with self.lock:
             a, b, c = self.phases["a"], self.phases["b"], self.phases["c"]
-            total_w = (a.act_power or 0.0) + (b.act_power or 0.0) + (c.act_power or 0.0)
+            raw_powers = (
+                float(a.act_power or 0.0),
+                float(b.act_power or 0.0),
+                float(c.act_power or 0.0),
+            )
+            a_power, b_power, c_power = _apply_request_side_power_scaling(raw_powers)
+            total_w = a_power + b_power + c_power
 
             if STRICT_MINIMAL_PAYLOAD:
                 # Minimal contract: only the 4 power keys some gateways require
                 return {
-                    "a_act_power": round(a.act_power, 2),
-                    "b_act_power": round(b.act_power, 2),
-                    "c_act_power": round(c.act_power, 2),
+                    "a_act_power": round(a_power, 2),
+                    "b_act_power": round(b_power, 2),
+                    "c_act_power": round(c_power, 2),
                     "total_act_power": round(total_w, 2),
                 }
 
@@ -279,9 +344,9 @@ class VirtualPro3EM:
                 "a_current": a.current if a.current is not None else 0.0,
                 "b_current": b.current if b.current is not None else 0.0,
                 "c_current": c.current if c.current is not None else 0.0,
-                "a_act_power": round(a.act_power, 2),
-                "b_act_power": round(b.act_power, 2),
-                "c_act_power": round(c.act_power, 2),
+                "a_act_power": round(a_power, 2),
+                "b_act_power": round(b_power, 2),
+                "c_act_power": round(c_power, 2),
                 "a_pf": a.pf if a.pf is not None else 1.0,
                 "b_pf": b.pf if b.pf is not None else 1.0,
                 "c_pf": c.pf if c.pf is not None else 1.0,
@@ -450,10 +515,94 @@ if StartAsyncTcpServer is not None:
     class ShellyModbusBridge:
         """Maintains a Modbus register image reflecting the virtual meter state."""
 
-        def __init__(self, vm: VirtualPro3EM):
-            self.vm = vm
-            self.lock = threading.RLock()
-            self.registers: Dict[int, int] = {}
+    def __init__(self, vm: VirtualPro3EM):
+        self.vm = vm
+        self.lock = threading.RLock()
+        self.registers: Dict[int, int] = {}
+        self.update()
+
+    def _write_pair(self, regs: Dict[int, int], address: int, values: List[int]) -> None:
+        regs[address] = values[0]
+        regs[address + 1] = values[1]
+
+    def _write_ascii(self, regs: Dict[int, int], address: int, register_count: int, text: str) -> None:
+        for idx, value in enumerate(_encode_ascii_registers(text, register_count)):
+            regs[address + idx] = value
+
+    def build_image(self) -> Dict[int, int]:
+        regs: Dict[int, int] = {}
+        with self.vm.lock:
+            phases = self.vm.phases
+            energy = self.vm.energy
+            freq = float(self.vm.frequency or 0.0)
+
+            # Instantaneous metrics (float32, big-endian)
+            self._write_pair(regs, 3000, _pack_register_pair(freq, ">f"))
+            self._write_pair(regs, 3002, _pack_register_pair(phases["a"].voltage or 0.0, ">f"))
+            self._write_pair(regs, 3004, _pack_register_pair(phases["b"].voltage or 0.0, ">f"))
+            self._write_pair(regs, 3006, _pack_register_pair(phases["c"].voltage or 0.0, ">f"))
+
+            self._write_pair(regs, 3010, _pack_register_pair(phases["a"].current or 0.0, ">f"))
+            self._write_pair(regs, 3012, _pack_register_pair(phases["b"].current or 0.0, ">f"))
+            self._write_pair(regs, 3014, _pack_register_pair(phases["c"].current or 0.0, ">f"))
+
+            raw_powers = (
+                float(phases["a"].act_power or 0.0),
+                float(phases["b"].act_power or 0.0),
+                float(phases["c"].act_power or 0.0),
+            )
+            a_power, b_power, c_power = _apply_request_side_power_scaling(raw_powers)
+            total_power = a_power + b_power + c_power
+            self._write_pair(regs, 3020, _pack_register_pair(a_power, ">f"))
+            self._write_pair(regs, 3022, _pack_register_pair(b_power, ">f"))
+            self._write_pair(regs, 3024, _pack_register_pair(c_power, ">f"))
+            self._write_pair(regs, 3026, _pack_register_pair(total_power, ">f"))
+
+            self._write_pair(regs, 3030, _pack_register_pair(phases["a"].pf if phases["a"].pf is not None else 1.0, ">f"))
+            self._write_pair(regs, 3032, _pack_register_pair(phases["b"].pf if phases["b"].pf is not None else 1.0, ">f"))
+            self._write_pair(regs, 3034, _pack_register_pair(phases["c"].pf if phases["c"].pf is not None else 1.0, ">f"))
+
+            # Energy counters (kWh as float32)
+            self._write_pair(regs, 3100, _pack_register_pair(energy.a_import, ">f"))
+            self._write_pair(regs, 3102, _pack_register_pair(energy.b_import, ">f"))
+            self._write_pair(regs, 3104, _pack_register_pair(energy.c_import, ">f"))
+            self._write_pair(regs, 3106, _pack_register_pair(energy.a_export, ">f"))
+            self._write_pair(regs, 3108, _pack_register_pair(energy.b_export, ">f"))
+            self._write_pair(regs, 3110, _pack_register_pair(energy.c_export, ">f"))
+            self._write_pair(regs, 3112, _pack_register_pair(energy.total_import, ">f"))
+            self._write_pair(regs, 3114, _pack_register_pair(energy.total_export, ">f"))
+
+            # Timestamp and uptime (uint32)
+            self._write_pair(regs, 3200, _pack_register_pair(now_ts(), ">I"))
+            self._write_pair(regs, 3202, _pack_register_pair(int(time.monotonic()), ">I"))
+
+            # Device metadata (ASCII, two chars per register)
+            self._write_ascii(regs, 3300, 8, DEVICE_ID)
+            self._write_ascii(regs, 3310, 6, MODEL)
+            self._write_ascii(regs, 3320, 6, FIRMWARE)
+            self._write_ascii(regs, 3330, 6, MAC)
+
+            # Status flags (uint16)
+            regs[3400] = 1  # device online
+            regs[3401] = 3  # number of phases
+
+        return regs
+
+    def update(self) -> None:
+        snapshot = self.build_image()
+        with self.lock:
+            self.registers = snapshot
+
+    def get_values(self, address: int, count: int) -> List[int]:
+        with self.lock:
+            return [self.registers.get(address + offset, 0) & 0xFFFF for offset in range(count)]
+
+    def handle_write(self, address: int, values: List[int]) -> None:
+        if not values:
+            return
+        if address == 4200 and values[0] == 1:
+            MODBUS_LOG.info("Modbus request: reset energy counters")
+            self.vm.emdata_reset_counters({})
             self.update()
 
         def _write_pair(self, regs: Dict[int, int], address: int, values: List[int]) -> None:
@@ -787,6 +936,8 @@ def _rpc_response_bytes(data: bytes) -> bytes:
 # -----------------------------
 @app.post("/rpc")
 async def rpc_endpoint(request: Request) -> JSONResponse:
+    client_host = getattr(request.client, "host", None) if request.client else None
+    _register_request_ip(client_host)
     body = await request.json()
     try:
         if isinstance(body, dict):
@@ -825,6 +976,8 @@ async def rpc_endpoint(request: Request) -> JSONResponse:
 @app.get("/rpc")
 async def rpc_get(request: Request) -> JSONResponse:
     # Support GET-style RPC: /rpc?method=EM.GetStatus&id=0 or /rpc?method=Shelly.GetConfig
+    client_host = getattr(request.client, "host", None) if request.client else None
+    _register_request_ip(client_host)
     qp = dict(request.query_params)
     # Batch GET support via ?batch=[{...},{...}]
     if "batch" in qp:
@@ -890,6 +1043,8 @@ async def rpc_get(request: Request) -> JSONResponse:
 @app.get("/rpc/{method}")
 async def rpc_get_method(method: str, request: Request) -> JSONResponse:
     # Support GET-style RPC: /rpc/EM.GetStatus?id=0
+    client_host = getattr(request.client, "host", None) if request.client else None
+    _register_request_ip(client_host)
     qp = dict(request.query_params)
     if "batch" in qp:
         try:
@@ -1331,6 +1486,18 @@ async def ws_handler(websocket):
             _add_recent_ws(ip or "?", "disconnect")
         except Exception:
             pass
+    remote = None
+    try:
+        addr = getattr(websocket, "remote_address", None)
+        if isinstance(addr, tuple) and addr:
+            remote = addr[0]
+    except Exception:
+        remote = None
+    _register_request_ip(remote)
+    async for message in websocket:
+        _register_request_ip(remote)
+        resp = _rpc_response_bytes(message.encode()).decode()
+        await websocket.send(resp)
 
 @app.on_event("startup")
 async def _on_startup():
@@ -1354,6 +1521,9 @@ async def _on_shutdown():
 @app.websocket("/rpc")
 async def ws_rpc(websocket: WebSocket):
     # WebSocket endpoint compatible with Shelly Gen2 ws://<ip>/rpc
+    client = getattr(websocket, "client", None)
+    host = getattr(client, "host", None) if client else None
+    _register_request_ip(host)
     await websocket.accept()
     WS_RPC_CLIENTS.add(websocket)
     # Initial full status
@@ -1387,6 +1557,7 @@ async def ws_rpc(websocket: WebSocket):
                 _add_recent_ws(ip or "?", "message", method)
             except Exception:
                 pass
+            _register_request_ip(host)
             resp = _rpc_response_bytes(message.encode()).decode()
             await websocket.send_text(resp)
     except Exception:
@@ -1449,15 +1620,16 @@ def _udp_build_response(obj: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
     if method == "EM.GetStatus":
         with VM.lock:
-            powers = [
-                VM.phases["a"].act_power or 0.0,
-                VM.phases["b"].act_power or 0.0,
-                VM.phases["c"].act_power or 0.0,
-            ]
-        a = _udp_decimal_enforcer(powers[0])
-        b = _udp_decimal_enforcer(powers[1])
-        c = _udp_decimal_enforcer(powers[2])
-        total = round(sum(powers), 3)
+            raw_powers = (
+                float(VM.phases["a"].act_power or 0.0),
+                float(VM.phases["b"].act_power or 0.0),
+                float(VM.phases["c"].act_power or 0.0),
+            )
+        scaled = _apply_request_side_power_scaling(raw_powers)
+        a = _udp_decimal_enforcer(scaled[0])
+        b = _udp_decimal_enforcer(scaled[1])
+        c = _udp_decimal_enforcer(scaled[2])
+        total = round(sum(scaled), 3)
         if total == round(total) or total == 0:
             total = total + 0.001
         return {
@@ -1473,12 +1645,13 @@ def _udp_build_response(obj: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         }
     elif method == "EM1.GetStatus":
         with VM.lock:
-            powers = [
-                VM.phases["a"].act_power or 0.0,
-                VM.phases["b"].act_power or 0.0,
-                VM.phases["c"].act_power or 0.0,
-            ]
-        total = round(sum(powers), 3)
+            raw_powers = (
+                float(VM.phases["a"].act_power or 0.0),
+                float(VM.phases["b"].act_power or 0.0),
+                float(VM.phases["c"].act_power or 0.0),
+            )
+        scaled = _apply_request_side_power_scaling(raw_powers)
+        total = round(sum(scaled), 3)
         if total == round(total) or total == 0:
             total = total + 0.001
         return {
@@ -1504,6 +1677,11 @@ class RPCUDPProtocol(asyncio.DatagramProtocol):
         # Enforce max payload; ignore oversize like b2500-meter (no JSON-RPC errors)
         if len(data) > self.max_size:
             return
+        try:
+            host = addr[0] if isinstance(addr, tuple) else None
+        except Exception:
+            host = None
+        _register_request_ip(host)
         try:
             text = data.decode("utf-8", errors="ignore")
             obj = json.loads(text)
@@ -1642,7 +1820,31 @@ def start_mdns():
             port=MODBUS_PORT,
             properties={k.encode(): v.encode() for k, v in txt.items()},
             server=f"{instance}.local.",
+        ),
+        ServiceInfo(
+            "_shelly._tcp.local.",
+            f"{instance}._shelly._tcp.local.",
+            addresses=[addr],
+            port=HTTP_PORT,
+            properties={k.encode(): v.encode() for k, v in txt.items()},
+            server=f"{instance}.local.",
+        ),
+    ]
+
+    info_http, info_shelly = services[:2]
+    info_modbus: Optional[ServiceInfo] = None
+
+    if MODBUS_ENABLE:
+        info_modbus = ServiceInfo(
+            "_modbus._tcp.local.",
+            f"{instance}._modbus._tcp.local.",
+            addresses=[addr],
+            port=MODBUS_PORT,
+            properties={k.encode(): v.encode() for k, v in txt.items()},
+            server=f"{instance}.local.",
         )
+
+    managed_services = [svc for svc in (info_http, info_shelly, info_modbus) if svc is not None]
 
     def _register():
         # Register with explicit TTL (seconds)
@@ -1657,6 +1859,12 @@ def start_mdns():
             zc.register_service(info_shelly)
             if info_modbus is not None:
                 zc.register_service(info_modbus)
+            for svc in managed_services:
+                zc.register_service(svc, ttl=120)
+        except TypeError:
+            # Older zeroconf without ttl param
+            for svc in managed_services:
+                zc.register_service(svc)
         current_ip = ip
         while True:
             time.sleep(60)
@@ -1687,6 +1895,21 @@ def start_mdns():
                             zc.register_service(info_shelly)
                             if info_modbus is not None:
                                 zc.register_service(info_modbus)
+                    for svc in managed_services:
+                        svc.addresses = [new_addr]
+                    try:
+                        for svc in managed_services:
+                            zc.update_service(svc)
+                    except Exception:
+                        # Fallback: unregister and register again
+                        try:
+                            for svc in managed_services:
+                                zc.unregister_service(svc)
+                        except Exception:
+                            pass
+                        try:
+                            for svc in managed_services:
+                                zc.register_service(svc)
                         except Exception:
                             pass
                     current_ip = new_ip
