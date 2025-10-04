@@ -2,21 +2,22 @@ version: "3.8"
 services:
   shelly3em-virtual:
     build: .
+    image: jneustock/shelly3emprovirtual
     container_name: shelly3em-virtual
     restart: unless-stopped
     network_mode: host   # recommended for UDP broadcast + mDNS
     environment:
-      HA_BASE_URL: "http://homeassistant:8123"
-      HA_TOKEN: "${HA_TOKEN}"
+      HA_BASE_URL: "http://192.168.2.225:8123"
+      HA_TOKEN: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiI0M2M0MTdlYTk1NmE0YjRhOTkxMWE2ZmZiMDBkM2NhZiIsImlhdCI6MTc1OTE2NzUyOCwiZXhwIjoyMDc0NTI3NTI4fQ.e1sJ6xlkH4YgM9ld3L00Ztsi_g3xQ-dLggEOLXeRDaM"
       POLL_INTERVAL: "2.0"
 
-      DEVICE_ID: "shellypro3em-virtual-001"
-      MODEL: "ShellyPro3EM"
-      FIRMWARE: "1.0.0-virt"
-      MAC: "AA:BB:CC:DD:EE:FF"
-      SN: "VIRT3EM001"
+      DEVICE_ID: "485519d74a28"
+      MODEL: "SPEM-003CEBEU"
+      FIRMWARE: "1.7.1"
+      MAC: "54:26:96:CE:22:7F"
+      SN: "485519d74a28"
 
-      HTTP_PORT: "8080"
+      HTTP_PORT: "80"
 
       # WS fan-out
       WS_PORT_START: "6010"
@@ -27,17 +28,19 @@ services:
       UDP_MAX: "32768"
 
       # Minimal payload mode for EM.GetStatus
-      STRICT_MINIMAL_PAYLOAD: "true"
+      STRICT_MINIMAL_PAYLOAD: "false"
+
+      GENERATION: "3"
 
       # mDNS
       MDNS_ENABLE: "true"
-      MDNS_HOSTNAME: "shellypro3em-virtual-001"
+      MDNS_HOSTNAME: "ShellyPro3EM-"
       # MDNS_IP: "192.168.1.50"   # optional pin
 
       # HA entities
-      A_POWER: "sensor.phase_a_power"
-      B_POWER: "sensor.phase_b_power"
-      C_POWER: "sensor.phase_c_power"
+      A_POWER: "sensor.phaseapower"
+      B_POWER: "sensor.phasebpower"
+      C_POWER: "sensor.phasecpower"
       A_VOLT: "sensor.phase_a_voltage"
       B_VOLT: "sensor.phase_b_voltage"
       C_VOLT: "sensor.phase_c_voltage"

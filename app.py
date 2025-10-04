@@ -9,12 +9,12 @@ import struct
 import signal
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List, Tuple
-from collections import defaultdict
+from collections import defaultdict, deque
 
 import requests
 from fastapi import FastAPI, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, PlainTextResponse, HTMLResponse
 
 # mDNS
 from zeroconf import Zeroconf, ServiceInfo, InterfaceChoice
@@ -319,7 +319,7 @@ class VirtualPro3EM:
         return {"ok": True, "ts": now_ts()}
 
     def shelly_get_status(self, _params: Dict[str, Any]) -> Dict[str, Any]:
-        return {
+        payload = {
             "ts": now_ts(),
             "sys": {
                 "uptime": int(time.monotonic()),
@@ -334,6 +334,8 @@ class VirtualPro3EM:
             "em:0": self.em_get_status({"id": 0}),
             "emdata:0": self.emdata_get_status({"id": 0}),
         }
+        print(payload)
+        return payload
 
     def build_device_info(self) -> Dict[str, Any]:
         auth_enabled = False
@@ -370,9 +372,9 @@ class VirtualPro3EM:
             "id": DEVICE_ID,
             "model": MODEL,
             "mac": MAC,
-            "fw_id": FIRMWARE,
+            "fw_id": FW_ID,
             "ver": FIRMWARE,
-            "app": MODEL,
+            "app": APP_ID,
             "uptime": int(time.monotonic()),
         }
 
@@ -444,174 +446,169 @@ def _encode_ascii_registers(text: str, register_count: int) -> List[int]:
     return regs
 
 
-class ShellyModbusBridge:
-    """Maintains a Modbus register image reflecting the virtual meter state."""
+if StartAsyncTcpServer is not None:
+    class ShellyModbusBridge:
+        """Maintains a Modbus register image reflecting the virtual meter state."""
 
-    def __init__(self, vm: VirtualPro3EM):
-        self.vm = vm
-        self.lock = threading.RLock()
-        self.registers: Dict[int, int] = {}
-        self.update()
-
-    def _write_pair(self, regs: Dict[int, int], address: int, values: List[int]) -> None:
-        regs[address] = values[0]
-        regs[address + 1] = values[1]
-
-    def _write_ascii(self, regs: Dict[int, int], address: int, register_count: int, text: str) -> None:
-        for idx, value in enumerate(_encode_ascii_registers(text, register_count)):
-            regs[address + idx] = value
-
-    def build_image(self) -> Dict[int, int]:
-        regs: Dict[int, int] = {}
-        with self.vm.lock:
-            phases = self.vm.phases
-            energy = self.vm.energy
-            freq = float(self.vm.frequency or 0.0)
-
-            # Instantaneous metrics (float32, big-endian)
-            self._write_pair(regs, 3000, _pack_register_pair(freq, ">f"))
-            self._write_pair(regs, 3002, _pack_register_pair(phases["a"].voltage or 0.0, ">f"))
-            self._write_pair(regs, 3004, _pack_register_pair(phases["b"].voltage or 0.0, ">f"))
-            self._write_pair(regs, 3006, _pack_register_pair(phases["c"].voltage or 0.0, ">f"))
-
-            self._write_pair(regs, 3010, _pack_register_pair(phases["a"].current or 0.0, ">f"))
-            self._write_pair(regs, 3012, _pack_register_pair(phases["b"].current or 0.0, ">f"))
-            self._write_pair(regs, 3014, _pack_register_pair(phases["c"].current or 0.0, ">f"))
-
-            total_power = (phases["a"].act_power or 0.0) + (phases["b"].act_power or 0.0) + (phases["c"].act_power or 0.0)
-            self._write_pair(regs, 3020, _pack_register_pair(phases["a"].act_power, ">f"))
-            self._write_pair(regs, 3022, _pack_register_pair(phases["b"].act_power, ">f"))
-            self._write_pair(regs, 3024, _pack_register_pair(phases["c"].act_power, ">f"))
-            self._write_pair(regs, 3026, _pack_register_pair(total_power, ">f"))
-
-            self._write_pair(regs, 3030, _pack_register_pair(phases["a"].pf if phases["a"].pf is not None else 1.0, ">f"))
-            self._write_pair(regs, 3032, _pack_register_pair(phases["b"].pf if phases["b"].pf is not None else 1.0, ">f"))
-            self._write_pair(regs, 3034, _pack_register_pair(phases["c"].pf if phases["c"].pf is not None else 1.0, ">f"))
-
-            # Energy counters (kWh as float32)
-            self._write_pair(regs, 3100, _pack_register_pair(energy.a_import, ">f"))
-            self._write_pair(regs, 3102, _pack_register_pair(energy.b_import, ">f"))
-            self._write_pair(regs, 3104, _pack_register_pair(energy.c_import, ">f"))
-            self._write_pair(regs, 3106, _pack_register_pair(energy.a_export, ">f"))
-            self._write_pair(regs, 3108, _pack_register_pair(energy.b_export, ">f"))
-            self._write_pair(regs, 3110, _pack_register_pair(energy.c_export, ">f"))
-            self._write_pair(regs, 3112, _pack_register_pair(energy.total_import, ">f"))
-            self._write_pair(regs, 3114, _pack_register_pair(energy.total_export, ">f"))
-
-            # Timestamp and uptime (uint32)
-            self._write_pair(regs, 3200, _pack_register_pair(now_ts(), ">I"))
-            self._write_pair(regs, 3202, _pack_register_pair(int(time.monotonic()), ">I"))
-
-            # Device metadata (ASCII, two chars per register)
-            self._write_ascii(regs, 3300, 8, DEVICE_ID)
-            self._write_ascii(regs, 3310, 6, MODEL)
-            self._write_ascii(regs, 3320, 6, FIRMWARE)
-            self._write_ascii(regs, 3330, 6, MAC)
-
-            # Status flags (uint16)
-            regs[3400] = 1  # device online
-            regs[3401] = 3  # number of phases
-
-        return regs
-
-    def update(self) -> None:
-        snapshot = self.build_image()
-        with self.lock:
-            self.registers = snapshot
-
-    def get_values(self, address: int, count: int) -> List[int]:
-        with self.lock:
-            return [self.registers.get(address + offset, 0) & 0xFFFF for offset in range(count)]
-
-    def handle_write(self, address: int, values: List[int]) -> None:
-        if not values:
-            return
-        if address == 4200 and values[0] == 1:
-            MODBUS_LOG.info("Modbus request: reset energy counters")
-            self.vm.emdata_reset_counters({})
+        def __init__(self, vm: VirtualPro3EM):
+            self.vm = vm
+            self.lock = threading.RLock()
+            self.registers: Dict[int, int] = {}
             self.update()
 
+        def _write_pair(self, regs: Dict[int, int], address: int, values: List[int]) -> None:
+            regs[address] = values[0]
+            regs[address + 1] = values[1]
 
-class ShellyModbusInputBlock(ModbusSparseDataBlock):
-    def __init__(self, bridge: ShellyModbusBridge):
-        super().__init__({})
-        self.bridge = bridge
+        def _write_ascii(self, regs: Dict[int, int], address: int, register_count: int, text: str) -> None:
+            for idx, value in enumerate(_encode_ascii_registers(text, register_count)):
+                regs[address + idx] = value
 
-    def getValues(self, address: int, count: int = 1) -> List[int]:  # type: ignore[override]
-        return self.bridge.get_values(address, count)
+        def build_image(self) -> Dict[int, int]:
+            regs: Dict[int, int] = {}
+            with self.vm.lock:
+                phases = self.vm.phases
+                energy = self.vm.energy
+                freq = float(self.vm.frequency or 0.0)
 
+                # Instantaneous metrics (float32, big-endian)
+                self._write_pair(regs, 3000, _pack_register_pair(freq, ">f"))
+                self._write_pair(regs, 3002, _pack_register_pair(phases["a"].voltage or 0.0, ">f"))
+                self._write_pair(regs, 3004, _pack_register_pair(phases["b"].voltage or 0.0, ">f"))
+                self._write_pair(regs, 3006, _pack_register_pair(phases["c"].voltage or 0.0, ">f"))
 
-class ShellyModbusHoldingBlock(ModbusSparseDataBlock):
-    def __init__(self, bridge: ShellyModbusBridge):
-        super().__init__({})
-        self.bridge = bridge
+                self._write_pair(regs, 3010, _pack_register_pair(phases["a"].current or 0.0, ">f"))
+                self._write_pair(regs, 3012, _pack_register_pair(phases["b"].current or 0.0, ">f"))
+                self._write_pair(regs, 3014, _pack_register_pair(phases["c"].current or 0.0, ">f"))
 
-    def getValues(self, address: int, count: int = 1) -> List[int]:  # type: ignore[override]
-        return self.bridge.get_values(address, count)
+                total_power = (phases["a"].act_power or 0.0) + (phases["b"].act_power or 0.0) + (phases["c"].act_power or 0.0)
+                self._write_pair(regs, 3020, _pack_register_pair(phases["a"].act_power, ">f"))
+                self._write_pair(regs, 3022, _pack_register_pair(phases["b"].act_power, ">f"))
+                self._write_pair(regs, 3024, _pack_register_pair(phases["c"].act_power, ">f"))
+                self._write_pair(regs, 3026, _pack_register_pair(total_power, ">f"))
 
-    def setValues(self, address: int, values: List[int]) -> None:  # type: ignore[override]
-        self.bridge.handle_write(address, values)
+                self._write_pair(regs, 3030, _pack_register_pair(phases["a"].pf if phases["a"].pf is not None else 1.0, ">f"))
+                self._write_pair(regs, 3032, _pack_register_pair(phases["b"].pf if phases["b"].pf is not None else 1.0, ">f"))
+                self._write_pair(regs, 3034, _pack_register_pair(phases["c"].pf if phases["c"].pf is not None else 1.0, ">f"))
 
+                # Energy counters (kWh as float32)
+                self._write_pair(regs, 3100, _pack_register_pair(energy.a_import, ">f"))
+                self._write_pair(regs, 3102, _pack_register_pair(energy.b_import, ">f"))
+                self._write_pair(regs, 3104, _pack_register_pair(energy.c_import, ">f"))
+                self._write_pair(regs, 3106, _pack_register_pair(energy.a_export, ">f"))
+                self._write_pair(regs, 3108, _pack_register_pair(energy.b_export, ">f"))
+                self._write_pair(regs, 3110, _pack_register_pair(energy.c_export, ">f"))
+                self._write_pair(regs, 3112, _pack_register_pair(energy.total_import, ">f"))
+                self._write_pair(regs, 3114, _pack_register_pair(energy.total_export, ">f"))
 
-def start_modbus_server(bridge: ShellyModbusBridge) -> None:
-    if not MODBUS_ENABLE:
-        return
-    if StartAsyncTcpServer is None:
-        MODBUS_LOG.warning("pymodbus not available; Modbus TCP disabled")
-        return
+                # Timestamp and uptime (uint32)
+                self._write_pair(regs, 3200, _pack_register_pair(now_ts(), ">I"))
+                self._write_pair(regs, 3202, _pack_register_pair(int(time.monotonic()), ">I"))
 
-    slave = ModbusSlaveContext(
-        di=ModbusSequentialDataBlock(0, [0] * 4),
-        co=ModbusSequentialDataBlock(0, [0] * 4),
-        hr=ShellyModbusHoldingBlock(bridge),
-        ir=ShellyModbusInputBlock(bridge),
-        zero_mode=True,
-    )
-    context = ModbusServerContext(slaves={MODBUS_UNIT_ID: slave}, single=False)
+                # Device metadata (ASCII, two chars per register)
+                self._write_ascii(regs, 3300, 8, DEVICE_ID)
+                self._write_ascii(regs, 3310, 6, MODEL)
+                self._write_ascii(regs, 3320, 6, FIRMWARE)
+                self._write_ascii(regs, 3330, 6, MAC)
 
-    identity = ModbusDeviceIdentification()
-    identity.VendorName = "Shelly"
-    identity.ProductCode = "SP3EM"
-    identity.VendorUrl = "https://shelly.cloud"
-    identity.ProductName = "Shelly Pro 3EM (virtual)"
-    identity.ModelName = MODEL
-    identity.MajorMinorRevision = FIRMWARE
-    try:
-        identity.UnitIdentifier = MODBUS_UNIT_ID  # type: ignore[attr-defined]
-    except Exception:
-        pass
+                # Status flags (uint16)
+                regs[3400] = 1  # device online
+                regs[3401] = 3  # number of phases
 
-    async def _serve():
-        MODBUS_LOG.info("Starting Modbus TCP on %s:%s", MODBUS_BIND, MODBUS_PORT)
-        await StartAsyncTcpServer(
-            context=context,
-            identity=identity,
-            address=(MODBUS_BIND, MODBUS_PORT),
-            allow_reuse_address=True,
+            return regs
+
+        def update(self) -> None:
+            snapshot = self.build_image()
+            with self.lock:
+                self.registers = snapshot
+
+        def get_values(self, address: int, count: int) -> List[int]:
+            with self.lock:
+                return [self.registers.get(address + offset, 0) & 0xFFFF for offset in range(count)]
+
+        def handle_write(self, address: int, values: List[int]) -> None:
+            if not values:
+                return
+            if address == 4200 and values[0] == 1:
+                MODBUS_LOG.info("Modbus request: reset energy counters")
+                self.vm.emdata_reset_counters({})
+                self.update()
+
+    class ShellyModbusInputBlock(ModbusSparseDataBlock):
+        def __init__(self, bridge: ShellyModbusBridge):
+            super().__init__({})
+            self.bridge = bridge
+
+        def getValues(self, address: int, count: int = 1) -> List[int]:  # type: ignore[override]
+            return self.bridge.get_values(address, count)
+
+    class ShellyModbusHoldingBlock(ModbusSparseDataBlock):
+        def __init__(self, bridge: ShellyModbusBridge):
+            super().__init__({})
+            self.bridge = bridge
+
+        def getValues(self, address: int, count: int = 1) -> List[int]:  # type: ignore[override]
+            return self.bridge.get_values(address, count)
+
+        def setValues(self, address: int, values: List[int]) -> None:  # type: ignore[override]
+            self.bridge.handle_write(address, values)
+
+    def start_modbus_server(bridge: ShellyModbusBridge) -> None:
+        if not MODBUS_ENABLE:
+            return
+        # Imports available if we got here
+        slave = ModbusSlaveContext(
+            di=ModbusSequentialDataBlock(0, [0] * 4),
+            co=ModbusSequentialDataBlock(0, [0] * 4),
+            hr=ShellyModbusHoldingBlock(bridge),
+            ir=ShellyModbusInputBlock(bridge),
+            zero_mode=True,
         )
+        context = ModbusServerContext(slaves={MODBUS_UNIT_ID: slave}, single=False)
 
-    def _runner():
+        identity = ModbusDeviceIdentification()
+        identity.VendorName = "Shelly"
+        identity.ProductCode = "SP3EM"
+        identity.VendorUrl = "https://shelly.cloud"
+        identity.ProductName = "Shelly Pro 3EM (virtual)"
+        identity.ModelName = MODEL
+        identity.MajorMinorRevision = FIRMWARE
         try:
-            asyncio.run(_serve())
-        except Exception as exc:  # pragma: no cover - background log only
-            MODBUS_LOG.error("Modbus server stopped: %s", exc)
+            identity.UnitIdentifier = MODBUS_UNIT_ID  # type: ignore[attr-defined]
+        except Exception:
+            pass
 
-    threading.Thread(target=_runner, daemon=True).start()
+        async def _serve():
+            MODBUS_LOG.info("Starting Modbus TCP on %s:%s", MODBUS_BIND, MODBUS_PORT)
+            await StartAsyncTcpServer(
+                context=context,
+                identity=identity,
+                address=(MODBUS_BIND, MODBUS_PORT),
+                allow_reuse_address=True,
+            )
+
+        def _runner():
+            try:
+                asyncio.run(_serve())
+            except Exception as exc:  # pragma: no cover - background log only
+                MODBUS_LOG.error("Modbus server stopped: %s", exc)
+
+        threading.Thread(target=_runner, daemon=True).start()
 
 # -----------------------------
 # JSON-RPC dispatcher
 # -----------------------------
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_LEVEL = os.getenv("LOG_LEVEL", "DEBUG").upper()
 logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO), format='%(asctime)s %(levelname)s %(message)s')
 log = logging.getLogger("virtual_shelly")
 
 app = FastAPI(title="Virtual Shelly Pro 3EM RPC")
 VM = VirtualPro3EM()
-MODBUS_BRIDGE: Optional[ShellyModbusBridge] = None
-if MODBUS_ENABLE:
+MODBUS_BRIDGE = None
+if MODBUS_ENABLE and StartAsyncTcpServer is not None:
     try:
-        MODBUS_BRIDGE = ShellyModbusBridge(VM)
-        start_modbus_server(MODBUS_BRIDGE)
+        MODBUS_BRIDGE = ShellyModbusBridge(VM)  # type: ignore[name-defined]
+        start_modbus_server(MODBUS_BRIDGE)      # type: ignore[name-defined]
     except Exception as exc:  # pragma: no cover - background log only
         MODBUS_LOG.error("Failed to start Modbus bridge: %s", exc)
         MODBUS_BRIDGE = None
@@ -645,6 +642,46 @@ WS_NOTIFY_TOTAL = 0
 WS_RPC_MESSAGES = 0
 UDP_PACKETS_TOTAL = 0
 UDP_REPLIES_TOTAL = 0
+
+# Recent client tracking (for UI)
+RECENT_MAX = int(os.getenv("RECENT_CLIENTS_MAX", "100"))
+RECENT_HTTP = deque(maxlen=RECENT_MAX)  # items: {ts, ip, method, verb}
+RECENT_WS = deque(maxlen=RECENT_MAX)    # items: {ts, ip, event, method?}
+RECENT_UDP = deque(maxlen=RECENT_MAX)   # items: {ts, ip, method}
+RECENT_LOCK = threading.RLock()
+
+def _add_recent_http(ip: str, method: Optional[str], verb: str):
+    try:
+        with RECENT_LOCK:
+            RECENT_HTTP.append({
+                "ts": now_ts(),
+                "ip": ip or "?",
+                "method": method or "?",
+                "verb": verb,
+            })
+    except Exception:
+        pass
+
+def _add_recent_ws(ip: str, event: str, method: Optional[str] = None):
+    try:
+        with RECENT_LOCK:
+            entry = {"ts": now_ts(), "ip": ip or "?", "event": event}
+            if method:
+                entry["method"] = method
+            RECENT_WS.append(entry)
+    except Exception:
+        pass
+
+def _add_recent_udp(ip: str, method: Optional[str]):
+    try:
+        with RECENT_LOCK:
+            RECENT_UDP.append({
+                "ts": now_ts(),
+                "ip": ip or "?",
+                "method": method or "?",
+            })
+    except Exception:
+        pass
 
 
 def _build_notify_status() -> str:
@@ -722,8 +759,16 @@ def _handle_rpc_call(req: Dict[str, Any]) -> Dict[str, Any]:
         return {"jsonrpc": "2.0", "id": rid, "result": {"ok": True, "dummy": True, "method": method}}
     try:
         result = METHODS[method](params)
+        try:
+            log.debug("RPC %s response: %s", method, result)
+        except Exception:
+            pass
         return {"jsonrpc": "2.0", "id": rid, "result": result}
     except Exception as e:
+        try:
+            log.debug("RPC %s error: %s", method, e)
+        except Exception:
+            pass
         return {"jsonrpc": "2.0", "id": rid, "error": {"code": -32000, "message": str(e)}}
 
 def _rpc_response_bytes(data: bytes) -> bytes:
@@ -748,6 +793,11 @@ async def rpc_endpoint(request: Request) -> JSONResponse:
             log.info("HTTP POST /rpc method=%s", body.get("method"))
             if isinstance(body, dict) and body.get("method"):
                 HTTP_RPC_METHODS[body.get("method")] += 1
+                try:
+                    ip = request.client.host if request.client else "?"
+                    _add_recent_http(ip, body.get("method"), "POST")
+                except Exception:
+                    pass
         else:
             log.info("HTTP POST /rpc batch size=%d", len(body) if isinstance(body, list) else 1)
     except Exception:
@@ -758,6 +808,12 @@ async def rpc_endpoint(request: Request) -> JSONResponse:
             r = _handle_rpc_call(item)
             if isinstance(item, dict) and item.get("method") and "error" in r:
                 HTTP_RPC_ERRORS[item.get("method")] += 1
+            try:
+                if isinstance(item, dict) and item.get("method"):
+                    ip = request.client.host if request.client else "?"
+                    _add_recent_http(ip, item.get("method"), "POST")
+            except Exception:
+                pass
             resp.append(r)
         return JSONResponse(resp)
     else:
@@ -784,6 +840,13 @@ async def rpc_get(request: Request) -> JSONResponse:
                 continue
             res = _handle_rpc_call(item)
             results.append(res.get("result", res))
+        try:
+            ip = request.client.host if request.client else "?"
+            for item in batch:
+                if isinstance(item, dict) and item.get("method"):
+                    _add_recent_http(ip, item.get("method"), "GET")
+        except Exception:
+            pass
         return JSONResponse(results)
     method = qp.pop("method", None)
     if not method:
@@ -791,6 +854,11 @@ async def rpc_get(request: Request) -> JSONResponse:
     try:
         log.info("HTTP GET /rpc method=%s", method)
         HTTP_RPC_METHODS[method] += 1
+    except Exception:
+        pass
+    try:
+        ip = request.client.host if request.client else "?"
+        _add_recent_http(ip, method, "GET")
     except Exception:
         pass
     # Build params: prefer explicit JSON in 'params', else use remaining query items
@@ -836,10 +904,20 @@ async def rpc_get_method(method: str, request: Request) -> JSONResponse:
                 continue
             res = _handle_rpc_call({"id": None, "method": method, "params": params})
             results.append(res.get("result", res))
+        try:
+            ip = request.client.host if request.client else "?"
+            _add_recent_http(ip, method, "GET")
+        except Exception:
+            pass
         return JSONResponse(results)
     try:
         log.info("HTTP GET /rpc/%s", method)
         HTTP_RPC_METHODS[method] += 1
+    except Exception:
+        pass
+    try:
+        ip = request.client.host if request.client else "?"
+        _add_recent_http(ip, method, "GET")
     except Exception:
         pass
     params: Dict[str, Any] = {}
@@ -899,11 +977,245 @@ def metrics():
     lines.append("# HELP virtual_shelly_udp_replies_total Total UDP replies sent")
     lines.append("# TYPE virtual_shelly_udp_replies_total counter")
     lines.append(f"virtual_shelly_udp_replies_total {UDP_REPLIES_TOTAL}")
-    return JSONResponse("\n".join(lines), media_type="text/plain")
+    return PlainTextResponse("\n".join(lines))
+
+
+@app.get("/admin/overview")
+def admin_overview():
+    # Aggregate a compact JSON for the UI
+    try:
+        device = VM.build_device_info()
+    except Exception:
+        device = {"id": DEVICE_ID, "model": MODEL, "ver": FIRMWARE}
+    try:
+        em = VM.em_get_status({"id": 0})
+    except Exception:
+        em = {}
+    try:
+        emdata = VM.emdata_get_status({"id": 0})
+    except Exception:
+        emdata = {}
+    # WS connected IPs (best-effort)
+    ws_ips: List[str] = []
+    try:
+        for ws in list(WS_RPC_CLIENTS):
+            try:
+                ip = ws.client.host if getattr(ws, "client", None) else None
+                if not ip and hasattr(ws, "remote_address") and ws.remote_address:
+                    ip = ws.remote_address[0]
+                if ip:
+                    ws_ips.append(ip)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    with RECENT_LOCK:
+        http_recent = list(RECENT_HTTP)[-20:]
+        ws_recent = list(RECENT_WS)[-20:]
+        udp_recent = list(RECENT_UDP)[-20:]
+    data = {
+        "device": {k: device.get(k) for k in ("id", "model", "ver", "app") if k in device},
+        "values": {"em": em, "emdata": emdata},
+        "metrics": {
+            "http": {
+                "total": int(sum(HTTP_RPC_METHODS.values())),
+                "by_method": dict(HTTP_RPC_METHODS),
+                "errors": dict(HTTP_RPC_ERRORS),
+            },
+            "ws": {
+                "rpc_messages": int(WS_RPC_MESSAGES),
+                "notify_total": int(WS_NOTIFY_TOTAL),
+                "clients": int(len(WS_RPC_CLIENTS)),
+            },
+            "udp": {
+                "packets": int(UDP_PACKETS_TOTAL),
+                "replies": int(UDP_REPLIES_TOTAL),
+            },
+        },
+        "clients": {
+            "http_recent": http_recent,
+            "ws_recent": ws_recent,
+            "udp_recent": udp_recent,
+            "ws_connected": ws_ips,
+        },
+        "ts": now_ts(),
+    }
+    return JSONResponse(data)
 
 @app.get("/")
 def root():
     return {"service": "virtual-shelly-pro-3em", "rpc": "/rpc"}
+
+
+@app.get("/ui")
+def ui_page():
+    html = f"""
+<!doctype html>
+<html lang=\"en\">
+<head>
+  <meta charset=\"utf-8\" />
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+  <title>Virtual Shelly 3EM Pro — Status</title>
+  <style>
+    body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 16px; color: #0b0b0b; }}
+    h1 {{ font-size: 20px; margin: 0 0 12px 0; }}
+    h2 {{ font-size: 16px; margin: 18px 0 10px 0; }}
+    .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }}
+    .card {{ border: 1px solid #e2e2e2; border-radius: 8px; padding: 12px; }}
+    table {{ border-collapse: collapse; width: 100%; }}
+    th, td {{ border-bottom: 1px solid #eee; padding: 6px 8px; text-align: left; font-size: 14px; }}
+    th {{ background: #fafafa; font-weight: 600; }}
+    .muted {{ color: #666; font-size: 12px; }}
+    code {{ background: #f6f8fa; padding: 1px 4px; border-radius: 4px; }}
+  </style>
+  <script>
+    async function fetchOverview() {{
+      try {{
+        const res = await fetch('/admin/overview');
+        const data = await res.json();
+        render(data);
+      }} catch (e) {{
+        console.error('Fetch error', e);
+      }}
+    }}
+
+    function fmt(n, digits=2) {{
+      if (n === null || n === undefined) return '-';
+      if (typeof n === 'number') return n.toFixed(digits);
+      return String(n);
+    }}
+
+    function render(d) {{
+      document.getElementById('device').textContent = (d.device?.id || 'device') + ' (' + (d.device?.model || '') + ' ' + (d.device?.ver || '') + ')';
+      document.getElementById('updated').textContent = new Date(d.ts * 1000).toLocaleString();
+
+      const em = d.values?.em || {{}};
+      const emdata = d.values?.emdata || {{}};
+
+      const cur = [
+        ['A Voltage (V)', fmt(em.a_voltage)],
+        ['B Voltage (V)', fmt(em.b_voltage)],
+        ['C Voltage (V)', fmt(em.c_voltage)],
+        ['A Current (A)', fmt(em.a_current)],
+        ['B Current (A)', fmt(em.b_current)],
+        ['C Current (A)', fmt(em.c_current)],
+        ['A Power (W)', fmt(em.a_act_power)],
+        ['B Power (W)', fmt(em.b_act_power)],
+        ['C Power (W)', fmt(em.c_act_power)],
+        ['Power Factor A', fmt(em.a_pf, 3)],
+        ['Power Factor B', fmt(em.b_pf, 3)],
+        ['Power Factor C', fmt(em.c_pf, 3)],
+        ['Frequency (Hz)', fmt(em.frequency, 2)],
+        ['Total Power (W)', fmt(em.total_act_power)],
+      ];
+      document.getElementById('current-tbody').innerHTML = cur.map(([k,v]) => `<tr><td>${{k}}</td><td><b>${{v}}</b></td></tr>`).join('');
+
+      const energy = [
+        ['A Import (kWh)', fmt(emdata.a_total_act_energy, 3)],
+        ['B Import (kWh)', fmt(emdata.b_total_act_energy, 3)],
+        ['C Import (kWh)', fmt(emdata.c_total_act_energy, 3)],
+        ['A Export (kWh)', fmt(emdata.a_total_act_ret_energy, 3)],
+        ['B Export (kWh)', fmt(emdata.b_total_act_ret_energy, 3)],
+        ['C Export (kWh)', fmt(emdata.c_total_act_ret_energy, 3)],
+        ['Total Import (kWh)', fmt(emdata.total_act, 3)],
+        ['Total Export (kWh)', fmt(emdata.total_act_ret, 3)],
+        ['Period (s)', fmt(emdata.period, 0)],
+      ];
+      document.getElementById('energy-tbody').innerHTML = energy.map(([k,v]) => `<tr><td>${{k}}</td><td><b>${{v}}</b></td></tr>`).join('');
+
+      // Metrics
+      const http = d.metrics?.http || {{}};
+      const ws = d.metrics?.ws || {{}};
+      const udp = d.metrics?.udp || {{}};
+      document.getElementById('http-total').textContent = http.total ?? 0;
+      const bym = http.by_method || {{}};
+      const rows = Object.keys(bym).sort().map(m => `<tr><td><code>${{m}}</code></td><td>${{bym[m]}}</td></tr>`).join('');
+      document.getElementById('http-by-method').innerHTML = rows || '<tr><td colspan="2" class="muted">No calls yet</td></tr>';
+      document.getElementById('ws-stats').textContent = `${{ws.clients || 0}} clients, ${{ws.rpc_messages || 0}} RPC msgs, ${{ws.notify_total || 0}} notifies`;
+      document.getElementById('udp-stats').textContent = `${{udp.packets || 0}} packets, ${{udp.replies || 0}} replies`;
+
+      // Clients
+      function listToRows(arr, cols) {{
+        return (arr||[]).slice().reverse().map(x => `<tr>${{cols.map(c => `<td>${{x[c] ?? '-'}}</td>`).join('')}}</tr>`).join('');
+      }}
+      document.getElementById('http-recent').innerHTML = listToRows(d.clients?.http_recent, ['ts','ip','verb','method']);
+      document.getElementById('ws-recent').innerHTML = listToRows(d.clients?.ws_recent, ['ts','ip','event','method']);
+      document.getElementById('udp-recent').innerHTML = listToRows(d.clients?.udp_recent, ['ts','ip','method']);
+      const wsCon = (d.clients?.ws_connected || []).map(ip => `<code>${{ip}}</code>`).join(', ');
+      document.getElementById('ws-connected').innerHTML = wsCon || '<span class="muted">None</span>';
+    }
+
+    window.addEventListener('load', () => {{
+      fetchOverview();
+      setInterval(fetchOverview, 5000);
+    }});
+  </script>
+</head>
+<body>
+  <h1>Virtual Shelly 3EM Pro — Status <span class="muted" id="device"></span></h1>
+  <div class="muted">Updated: <span id="updated">-</span></div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>Current Values</h2>
+      <table>
+        <tbody id="current-tbody"></tbody>
+      </table>
+    </div>
+    <div class="card">
+      <h2>Energy Counters</h2>
+      <table>
+        <tbody id="energy-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>HTTP Metrics</h2>
+      <div>Total: <b id="http-total">0</b></div>
+      <table>
+        <thead><tr><th>Method</th><th>Count</th></tr></thead>
+        <tbody id="http-by-method"></tbody>
+      </table>
+    </div>
+    <div class="card">
+      <h2>WS & UDP Metrics</h2>
+      <div>WebSocket: <b id="ws-stats">-</b></div>
+      <div>UDP: <b id="udp-stats">-</b></div>
+      <div style="margin-top:8px">WS Connected: <span id="ws-connected"></span></div>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>Recent HTTP Clients</h2>
+      <table>
+        <thead><tr><th>TS</th><th>IP</th><th>Verb</th><th>Method</th></tr></thead>
+        <tbody id="http-recent"></tbody>
+      </table>
+    </div>
+    <div class="card">
+      <h2>Recent WS Clients</h2>
+      <table>
+        <thead><tr><th>TS</th><th>IP</th><th>Event</th><th>Method</th></tr></thead>
+        <tbody id="ws-recent"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <h2>Recent UDP Clients</h2>
+    <table>
+      <thead><tr><th>TS</th><th>IP</th><th>Method</th></tr></thead>
+      <tbody id="udp-recent"></tbody>
+    </table>
+  </div>
+
+</body>
+</html>
+"""
+    return HTMLResponse(html)
 
 @app.get("/shelly")
 def shelly_http_info():
@@ -922,11 +1234,11 @@ def shelly_http_info():
     return {
         "name": DEVICE_ID,
         "id": DEVICE_ID,
-        "app": MODEL,
+        "app": APP_ID,
         "ver": FIRMWARE,
-        "fw_id": FIRMWARE,
+        "fw_id": FW_ID,
         "model": MODEL,
-        "gen": 2,
+        "gen": GENERATION,
         "mac": MAC,
         "sn": SN,
         "manufacturer": MANUFACTURER,
@@ -984,9 +1296,41 @@ threading.Thread(target=poll_loop, daemon=True).start()
 # -----------------------------
 async def ws_handler(websocket):
     # Minimal handler for raw WS fan-out ports; no broadcast support.
-    async for message in websocket:
-        resp = _rpc_response_bytes(message.encode()).decode()
-        await websocket.send(resp)
+    try:
+        # Connection event
+        try:
+            ip = None
+            if hasattr(websocket, "remote_address") and websocket.remote_address:
+                ip = websocket.remote_address[0]
+            _add_recent_ws(ip or "?", "connect")
+        except Exception:
+            pass
+        async for message in websocket:
+            try:
+                # Attempt to parse method for tracking
+                m = None
+                try:
+                    obj = json.loads(message)
+                    if isinstance(obj, dict):
+                        m = obj.get("method")
+                except Exception:
+                    m = None
+                ip = None
+                if hasattr(websocket, "remote_address") and websocket.remote_address:
+                    ip = websocket.remote_address[0]
+                _add_recent_ws(ip or "?", "message", m)
+            except Exception:
+                pass
+            resp = _rpc_response_bytes(message.encode()).decode()
+            await websocket.send(resp)
+    finally:
+        try:
+            ip = None
+            if hasattr(websocket, "remote_address") and websocket.remote_address:
+                ip = websocket.remote_address[0]
+            _add_recent_ws(ip or "?", "disconnect")
+        except Exception:
+            pass
 
 @app.on_event("startup")
 async def _on_startup():
@@ -1019,11 +1363,28 @@ async def ws_rpc(websocket: WebSocket):
     except Exception:
         pass
     try:
+        ip = websocket.client.host if getattr(websocket, "client", None) else "?"
+        _add_recent_ws(ip or "?", "connect")
+    except Exception:
+        pass
+    try:
         while True:
             message = await websocket.receive_text()
             try:
                 global WS_RPC_MESSAGES
                 WS_RPC_MESSAGES += 1
+            except Exception:
+                pass
+            try:
+                ip = websocket.client.host if getattr(websocket, "client", None) else "?"
+                method = None
+                try:
+                    obj = json.loads(message)
+                    if isinstance(obj, dict):
+                        method = obj.get("method")
+                except Exception:
+                    method = None
+                _add_recent_ws(ip or "?", "message", method)
             except Exception:
                 pass
             resp = _rpc_response_bytes(message.encode()).decode()
@@ -1040,6 +1401,11 @@ async def ws_rpc(websocket: WebSocket):
             pass
         try:
             log.info("WS /rpc disconnected; clients=%d", len(WS_RPC_CLIENTS))
+        except Exception:
+            pass
+        try:
+            ip = websocket.client.host if getattr(websocket, "client", None) else "?"
+            _add_recent_ws(ip or "?", "disconnect")
         except Exception:
             pass
 
@@ -1148,6 +1514,10 @@ class RPCUDPProtocol(asyncio.DatagramProtocol):
             log.debug("UDP packet from %s method=%s", addr, m)
             global UDP_PACKETS_TOTAL
             UDP_PACKETS_TOTAL += 1
+            try:
+                _add_recent_udp(addr[0] if isinstance(addr, tuple) else str(addr), m)
+            except Exception:
+                pass
         except Exception:
             pass
         # If payload is JSON-RPC 2.0, respond with JSON-RPC envelope
@@ -1156,6 +1526,10 @@ class RPCUDPProtocol(asyncio.DatagramProtocol):
             (isinstance(obj, list) and any(isinstance(x, dict) and x.get("jsonrpc") == "2.0" for x in obj))
         ):
             resp = _rpc_response_bytes(text.encode("utf-8"))
+            try:
+                log.debug("UDP JSON-RPC response: %s", resp.decode("utf-8", errors="ignore"))
+            except Exception:
+                pass
             self.transport.sendto(resp, addr)
             return
         resp_obj = _udp_build_response(obj)
@@ -1163,6 +1537,10 @@ class RPCUDPProtocol(asyncio.DatagramProtocol):
             return
         # Compact separators to match b2500-meter
         payload = json.dumps(resp_obj, separators=(",", ":")).encode()
+        try:
+            log.debug("UDP Shelly-style response: %s", payload.decode("utf-8", errors="ignore"))
+        except Exception:
+            pass
         self.transport.sendto(payload, addr)
         try:
             log.debug("UDP reply to %s method=%s bytes=%d", addr, obj.get("method"), len(payload))
@@ -1239,35 +1617,31 @@ def start_mdns():
         "ver": FIRMWARE,
         "mac": MAC,
     }
-    services = [
-        ServiceInfo(
-            "_http._tcp.local.",
-            f"{instance}._http._tcp.local.",
+    info_http = ServiceInfo(
+        "_http._tcp.local.",
+        f"{instance}._http._tcp.local.",
+        addresses=[addr],
+        port=HTTP_PORT,
+        properties={k.encode(): v.encode() for k, v in txt.items()},
+        server=f"{instance}.local.",
+    )
+    info_shelly = ServiceInfo(
+        "_shelly._tcp.local.",
+        f"{instance}._shelly._tcp.local.",
+        addresses=[addr],
+        port=HTTP_PORT,
+        properties={k.encode(): v.encode() for k, v in txt.items()},
+        server=f"{instance}.local.",
+    )
+    info_modbus = None
+    if MODBUS_ENABLE and StartAsyncTcpServer is not None:
+        info_modbus = ServiceInfo(
+            "_modbus._tcp.local.",
+            f"{instance}._modbus._tcp.local.",
             addresses=[addr],
-            port=HTTP_PORT,
+            port=MODBUS_PORT,
             properties={k.encode(): v.encode() for k, v in txt.items()},
             server=f"{instance}.local.",
-        ),
-        ServiceInfo(
-            "_shelly._tcp.local.",
-            f"{instance}._shelly._tcp.local.",
-            addresses=[addr],
-            port=HTTP_PORT,
-            properties={k.encode(): v.encode() for k, v in txt.items()},
-            server=f"{instance}.local.",
-        ),
-    ]
-
-    if MODBUS_ENABLE:
-        services.append(
-            ServiceInfo(
-                "_modbus._tcp.local.",
-                f"{instance}._modbus._tcp.local.",
-                addresses=[addr],
-                port=MODBUS_PORT,
-                properties={k.encode(): v.encode() for k, v in txt.items()},
-                server=f"{instance}.local.",
-            )
         )
 
     def _register():
@@ -1275,10 +1649,14 @@ def start_mdns():
         try:
             zc.register_service(info_http, ttl=120)
             zc.register_service(info_shelly, ttl=120)
+            if info_modbus is not None:
+                zc.register_service(info_modbus, ttl=120)
         except TypeError:
             # Older zeroconf without ttl param
             zc.register_service(info_http)
             zc.register_service(info_shelly)
+            if info_modbus is not None:
+                zc.register_service(info_modbus)
         current_ip = ip
         while True:
             time.sleep(60)
@@ -1288,19 +1666,27 @@ def start_mdns():
                     new_addr = socket.inet_aton(new_ip)
                     info_http.addresses = [new_addr]
                     info_shelly.addresses = [new_addr]
+                    if info_modbus is not None:
+                        info_modbus.addresses = [new_addr]
                     try:
                         zc.update_service(info_http)
                         zc.update_service(info_shelly)
+                        if info_modbus is not None:
+                            zc.update_service(info_modbus)
                     except Exception:
                         # Fallback: unregister and register again
                         try:
                             zc.unregister_service(info_http)
                             zc.unregister_service(info_shelly)
+                            if info_modbus is not None:
+                                zc.unregister_service(info_modbus)
                         except Exception:
                             pass
                         try:
                             zc.register_service(info_http)
                             zc.register_service(info_shelly)
+                            if info_modbus is not None:
+                                zc.register_service(info_modbus)
                         except Exception:
                             pass
                     current_ip = new_ip

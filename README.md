@@ -9,6 +9,7 @@ Features
 
 - HTTP API (FastAPI + Uvicorn) with:
   - GET `/shelly`: Gen2 device info (id, app, ver, model, gen, mac, sn, auth flags).
+  - GET `/ui`: Minimal web interface showing current values, recent client IPs, and endpoint metrics (auto-refreshes every 5s).
   - POST `/rpc`: JSON‑RPC 2.0 envelope for Shelly.* and EM*/EMData* methods.
   - GET `/rpc?method=...` and GET `/rpc/{method}`: returns the method result directly (no envelope), matching Shelly GET semantics.
   - GET `/healthz` and GET `/`: simple health and info.
@@ -131,7 +132,8 @@ Shelly app notes
 Troubleshooting
 
 - Check health: `curl http://<ip>/healthz` (image includes a Docker HEALTHCHECK)
- - Inspect metrics: `curl http://<ip>/metrics`
+- Inspect metrics: `curl http://<ip>/metrics`
+- Open the UI: http://<ip>/ui (auto-refresh every 5s)
 - Inspect logs: `docker logs -f shelly3em-virtual`
 - Verify endpoints hit by the app (look for GET /shelly, /rpc calls, WS /rpc handshakes).
 - Confirm UDP replies with netcat; try both 1010 and 2220 depending on your consumer.
