@@ -1204,7 +1204,7 @@ def root():
 
 @app.get("/ui")
 def ui_page():
-    html = f"""
+    html = """
 <!doctype html>
 <html lang=\"en\">
 <head>
@@ -1212,40 +1212,40 @@ def ui_page():
   <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
   <title>Virtual Shelly 3EM Pro — Status</title>
   <style>
-    body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 16px; color: #0b0b0b; }}
-    h1 {{ font-size: 20px; margin: 0 0 12px 0; }}
-    h2 {{ font-size: 16px; margin: 18px 0 10px 0; }}
-    .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }}
-    .card {{ border: 1px solid #e2e2e2; border-radius: 8px; padding: 12px; }}
-    table {{ border-collapse: collapse; width: 100%; }}
-    th, td {{ border-bottom: 1px solid #eee; padding: 6px 8px; text-align: left; font-size: 14px; }}
-    th {{ background: #fafafa; font-weight: 600; }}
-    .muted {{ color: #666; font-size: 12px; }}
-    code {{ background: #f6f8fa; padding: 1px 4px; border-radius: 4px; }}
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 16px; color: #0b0b0b; }
+    h1 { font-size: 20px; margin: 0 0 12px 0; }
+    h2 { font-size: 16px; margin: 18px 0 10px 0; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .card { border: 1px solid #e2e2e2; border-radius: 8px; padding: 12px; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border-bottom: 1px solid #eee; padding: 6px 8px; text-align: left; font-size: 14px; }
+    th { background: #fafafa; font-weight: 600; }
+    .muted { color: #666; font-size: 12px; }
+    code { background: #f6f8fa; padding: 1px 4px; border-radius: 4px; }
   </style>
   <script>
-    async function fetchOverview() {{
-      try {{
+    async function fetchOverview() {
+      try {
         const res = await fetch('/admin/overview');
         const data = await res.json();
         render(data);
-      }} catch (e) {{
+      } catch (e) {
         console.error('Fetch error', e);
-      }}
-    }}
+      }
+    }
 
-    function fmt(n, digits=2) {{
+    function fmt(n, digits=2) {
       if (n === null || n === undefined) return '-';
       if (typeof n === 'number') return n.toFixed(digits);
       return String(n);
-    }}
+    }
 
-    function render(d) {{
+    function render(d) {
       document.getElementById('device').textContent = (d.device?.id || 'device') + ' (' + (d.device?.model || '') + ' ' + (d.device?.ver || '') + ')';
       document.getElementById('updated').textContent = new Date(d.ts * 1000).toLocaleString();
 
-      const em = d.values?.em || {{}};
-      const emdata = d.values?.emdata || {{}};
+      const em = d.values?.em || {};
+      const emdata = d.values?.emdata || {};
 
       const cur = [
         ['A Voltage (V)', fmt(em.a_voltage)],
@@ -1263,7 +1263,7 @@ def ui_page():
         ['Frequency (Hz)', fmt(em.frequency, 2)],
         ['Total Power (W)', fmt(em.total_act_power)],
       ];
-      document.getElementById('current-tbody').innerHTML = cur.map(([k,v]) => `<tr><td>${{k}}</td><td><b>${{v}}</b></td></tr>`).join('');
+      document.getElementById('current-tbody').innerHTML = cur.map(([k,v]) => `<tr><td>${k}</td><td><b>${v}</b></td></tr>`).join('');
 
       const energy = [
         ['A Import (kWh)', fmt(emdata.a_total_act_energy, 3)],
@@ -1276,34 +1276,34 @@ def ui_page():
         ['Total Export (kWh)', fmt(emdata.total_act_ret, 3)],
         ['Period (s)', fmt(emdata.period, 0)],
       ];
-      document.getElementById('energy-tbody').innerHTML = energy.map(([k,v]) => `<tr><td>${{k}}</td><td><b>${{v}}</b></td></tr>`).join('');
+      document.getElementById('energy-tbody').innerHTML = energy.map(([k,v]) => `<tr><td>${k}</td><td><b>${v}</b></td></tr>`).join('');
 
       // Metrics
-      const http = d.metrics?.http || {{}};
-      const ws = d.metrics?.ws || {{}};
-      const udp = d.metrics?.udp || {{}};
+      const http = d.metrics?.http || {};
+      const ws = d.metrics?.ws || {};
+      const udp = d.metrics?.udp || {};
       document.getElementById('http-total').textContent = http.total ?? 0;
-      const bym = http.by_method || {{}};
-      const rows = Object.keys(bym).sort().map(m => `<tr><td><code>${{m}}</code></td><td>${{bym[m]}}</td></tr>`).join('');
+      const bym = http.by_method || {};
+      const rows = Object.keys(bym).sort().map(m => `<tr><td><code>${m}</code></td><td>${bym[m]}</td></tr>`).join('');
       document.getElementById('http-by-method').innerHTML = rows || '<tr><td colspan="2" class="muted">No calls yet</td></tr>';
-      document.getElementById('ws-stats').textContent = `${{ws.clients || 0}} clients, ${{ws.rpc_messages || 0}} RPC msgs, ${{ws.notify_total || 0}} notifies`;
-      document.getElementById('udp-stats').textContent = `${{udp.packets || 0}} packets, ${{udp.replies || 0}} replies`;
+      document.getElementById('ws-stats').textContent = `${ws.clients || 0} clients, ${ws.rpc_messages || 0} RPC msgs, ${ws.notify_total || 0} notifies`;
+      document.getElementById('udp-stats').textContent = `${udp.packets || 0} packets, ${udp.replies || 0} replies`;
 
       // Clients
-      function listToRows(arr, cols) {{
-        return (arr||[]).slice().reverse().map(x => `<tr>${{cols.map(c => `<td>${{x[c] ?? '-'}}</td>`).join('')}}</tr>`).join('');
-      }}
+      function listToRows(arr, cols) {
+        return (arr||[]).slice().reverse().map(x => `<tr>${cols.map(c => `<td>${x[c] ?? '-'}</td>`).join('')}</tr>`).join('');
+      }
       document.getElementById('http-recent').innerHTML = listToRows(d.clients?.http_recent, ['ts','ip','verb','method']);
       document.getElementById('ws-recent').innerHTML = listToRows(d.clients?.ws_recent, ['ts','ip','event','method']);
       document.getElementById('udp-recent').innerHTML = listToRows(d.clients?.udp_recent, ['ts','ip','method']);
-      const wsCon = (d.clients?.ws_connected || []).map(ip => `<code>${{ip}}</code>`).join(', ');
+      const wsCon = (d.clients?.ws_connected || []).map(ip => `<code>${ip}</code>`).join(', ');
       document.getElementById('ws-connected').innerHTML = wsCon || '<span class="muted">None</span>';
     }
 
-    window.addEventListener('load', () => {{
+    window.addEventListener('load', () => {
       fetchOverview();
       setInterval(fetchOverview, 5000);
-    }});
+    });
   </script>
 </head>
 <body>
@@ -1450,42 +1450,7 @@ threading.Thread(target=poll_loop, daemon=True).start()
 # WebSockets 6010–6022
 # -----------------------------
 async def ws_handler(websocket):
-    # Minimal handler for raw WS fan-out ports; no broadcast support.
-    try:
-        # Connection event
-        try:
-            ip = None
-            if hasattr(websocket, "remote_address") and websocket.remote_address:
-                ip = websocket.remote_address[0]
-            _add_recent_ws(ip or "?", "connect")
-        except Exception:
-            pass
-        async for message in websocket:
-            try:
-                # Attempt to parse method for tracking
-                m = None
-                try:
-                    obj = json.loads(message)
-                    if isinstance(obj, dict):
-                        m = obj.get("method")
-                except Exception:
-                    m = None
-                ip = None
-                if hasattr(websocket, "remote_address") and websocket.remote_address:
-                    ip = websocket.remote_address[0]
-                _add_recent_ws(ip or "?", "message", m)
-            except Exception:
-                pass
-            resp = _rpc_response_bytes(message.encode()).decode()
-            await websocket.send(resp)
-    finally:
-        try:
-            ip = None
-            if hasattr(websocket, "remote_address") and websocket.remote_address:
-                ip = websocket.remote_address[0]
-            _add_recent_ws(ip or "?", "disconnect")
-        except Exception:
-            pass
+    # Raw WS fan-out ports; echo JSON-RPC responses back.
     remote = None
     try:
         addr = getattr(websocket, "remote_address", None)
@@ -1493,11 +1458,33 @@ async def ws_handler(websocket):
             remote = addr[0]
     except Exception:
         remote = None
-    _register_request_ip(remote)
-    async for message in websocket:
+    # Track connect
+    try:
         _register_request_ip(remote)
-        resp = _rpc_response_bytes(message.encode()).decode()
-        await websocket.send(resp)
+        _add_recent_ws(remote or "?", "connect")
+    except Exception:
+        pass
+    try:
+        async for message in websocket:
+            try:
+                _register_request_ip(remote)
+                method = None
+                try:
+                    obj = json.loads(message)
+                    if isinstance(obj, dict):
+                        method = obj.get("method")
+                except Exception:
+                    method = None
+                _add_recent_ws(remote or "?", "message", method)
+            except Exception:
+                pass
+            resp = _rpc_response_bytes(message.encode()).decode()
+            await websocket.send(resp)
+    finally:
+        try:
+            _add_recent_ws(remote or "?", "disconnect")
+        except Exception:
+            pass
 
 @app.on_event("startup")
 async def _on_startup():
@@ -1820,31 +1807,7 @@ def start_mdns():
             port=MODBUS_PORT,
             properties={k.encode(): v.encode() for k, v in txt.items()},
             server=f"{instance}.local.",
-        ),
-        ServiceInfo(
-            "_shelly._tcp.local.",
-            f"{instance}._shelly._tcp.local.",
-            addresses=[addr],
-            port=HTTP_PORT,
-            properties={k.encode(): v.encode() for k, v in txt.items()},
-            server=f"{instance}.local.",
-        ),
-    ]
-
-    info_http, info_shelly = services[:2]
-    info_modbus: Optional[ServiceInfo] = None
-
-    if MODBUS_ENABLE:
-        info_modbus = ServiceInfo(
-            "_modbus._tcp.local.",
-            f"{instance}._modbus._tcp.local.",
-            addresses=[addr],
-            port=MODBUS_PORT,
-            properties={k.encode(): v.encode() for k, v in txt.items()},
-            server=f"{instance}.local.",
         )
-
-    managed_services = [svc for svc in (info_http, info_shelly, info_modbus) if svc is not None]
 
     def _register():
         # Register with explicit TTL (seconds)
@@ -1859,12 +1822,6 @@ def start_mdns():
             zc.register_service(info_shelly)
             if info_modbus is not None:
                 zc.register_service(info_modbus)
-            for svc in managed_services:
-                zc.register_service(svc, ttl=120)
-        except TypeError:
-            # Older zeroconf without ttl param
-            for svc in managed_services:
-                zc.register_service(svc)
         current_ip = ip
         while True:
             time.sleep(60)
@@ -1895,21 +1852,6 @@ def start_mdns():
                             zc.register_service(info_shelly)
                             if info_modbus is not None:
                                 zc.register_service(info_modbus)
-                    for svc in managed_services:
-                        svc.addresses = [new_addr]
-                    try:
-                        for svc in managed_services:
-                            zc.update_service(svc)
-                    except Exception:
-                        # Fallback: unregister and register again
-                        try:
-                            for svc in managed_services:
-                                zc.unregister_service(svc)
-                        except Exception:
-                            pass
-                        try:
-                            for svc in managed_services:
-                                zc.register_service(svc)
                         except Exception:
                             pass
                     current_ip = new_ip
