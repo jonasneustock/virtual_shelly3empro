@@ -15,6 +15,10 @@ import requests
 from fastapi import FastAPI, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse, PlainTextResponse, HTMLResponse
+from virtual_shelly import metrics as MET
+from virtual_shelly import ui as UI
+from virtual_shelly import rpc_core as RPC
+from virtual_shelly import udp_server as UDP
 
 # mDNS
 from zeroconf import Zeroconf, ServiceInfo, InterfaceChoice
@@ -785,52 +789,12 @@ _last_notify_values: Optional[Tuple[float, float, float, float]] = None
 # -----------------------------
 # Metrics (simple Prometheus-like text output)
 # -----------------------------
-HTTP_RPC_METHODS = defaultdict(int)
-HTTP_RPC_ERRORS = defaultdict(int)
-WS_NOTIFY_TOTAL = 0
-WS_RPC_MESSAGES = 0
-UDP_PACKETS_TOTAL = 0
-UDP_REPLIES_TOTAL = 0
-
-# Recent client tracking (for UI)
-RECENT_MAX = int(os.getenv("RECENT_CLIENTS_MAX", "100"))
-RECENT_HTTP = deque(maxlen=RECENT_MAX)  # items: {ts, ip, method, verb}
-RECENT_WS = deque(maxlen=RECENT_MAX)    # items: {ts, ip, event, method?}
-RECENT_UDP = deque(maxlen=RECENT_MAX)   # items: {ts, ip, method}
-RECENT_LOCK = threading.RLock()
-
-def _add_recent_http(ip: str, method: Optional[str], verb: str):
-    try:
-        with RECENT_LOCK:
-            RECENT_HTTP.append({
-                "ts": now_ts(),
-                "ip": ip or "?",
-                "method": method or "?",
-                "verb": verb,
-            })
-    except Exception:
-        pass
-
-def _add_recent_ws(ip: str, event: str, method: Optional[str] = None):
-    try:
-        with RECENT_LOCK:
-            entry = {"ts": now_ts(), "ip": ip or "?", "event": event}
-            if method:
-                entry["method"] = method
-            RECENT_WS.append(entry)
-    except Exception:
-        pass
-
-def _add_recent_udp(ip: str, method: Optional[str]):
-    try:
-        with RECENT_LOCK:
-            RECENT_UDP.append({
-                "ts": now_ts(),
-                "ip": ip or "?",
-                "method": method or "?",
-            })
-    except Exception:
-        pass
+HTTP_RPC_METHODS = MET.HTTP_RPC_METHODS
+HTTP_RPC_ERRORS = MET.HTTP_RPC_ERRORS
+WS_NOTIFY_TOTAL = None  # shim for references below
+WS_RPC_MESSAGES = None
+UDP_PACKETS_TOTAL = None
+UDP_REPLIES_TOTAL = None
 
 
 def _build_notify_status() -> str:
@@ -877,59 +841,13 @@ def _enqueue_ws_broadcast(msg: str):
     except Exception:
         pass
 
-METHODS = {
-    "Shelly.GetStatus": VM.shelly_get_status,
-    "Shelly.GetDeviceInfo": VM.shelly_get_device_info,
-    "Shelly.GetConfig": VM.shelly_get_config,
-    "Shelly.SetConfig": VM.shelly_set_config,
-    "Shelly.ListMethods": lambda _params: sorted(list([] if False else [])),  # placeholder, replaced below
-    "Shelly.Ping": VM.shelly_ping,
-    "Shelly.Reboot": VM.shelly_reboot,
-    "EM.GetStatus": VM.em_get_status,
-    "EMData.GetStatus": VM.emdata_get_status,
-    "EMData.ResetCounters": VM.emdata_reset_counters,
-    "MQTT.GetConfig": VM.mqtt_get_config,
-    "MQTT.SetConfig": VM.mqtt_set_config,
-    "MQTT.Status": VM.mqtt_status,
-    "Sys.GetStatus": VM.sys_get_status,
-    "Sys.GetInfo": VM.sys_get_info,
-    "Sys.SetConfig": VM.sys_set_config,
-}
-
-# Fill Shelly.ListMethods now that METHODS exists
-METHODS["Shelly.ListMethods"] = lambda _params: sorted(METHODS.keys())
+METHODS = RPC.build_methods(VM)
 
 def _handle_rpc_call(req: Dict[str, Any]) -> Dict[str, Any]:
-    rid = req.get("id")
-    method = req.get("method")
-    params = req.get("params", {}) or {}
-    if method not in METHODS:
-        # Permissive dummy response for unknown methods
-        return {"jsonrpc": "2.0", "id": rid, "result": {"ok": True, "dummy": True, "method": method}}
-    try:
-        result = METHODS[method](params)
-        try:
-            log.debug("RPC %s response: %s", method, result)
-        except Exception:
-            pass
-        return {"jsonrpc": "2.0", "id": rid, "result": result}
-    except Exception as e:
-        try:
-            log.debug("RPC %s error: %s", method, e)
-        except Exception:
-            pass
-        return {"jsonrpc": "2.0", "id": rid, "error": {"code": -32000, "message": str(e)}}
+    return RPC.handle_rpc_call(METHODS, req, log)
 
 def _rpc_response_bytes(data: bytes) -> bytes:
-    try:
-        obj = json.loads(data.decode("utf-8", errors="ignore"))
-    except Exception:
-        return json.dumps({"jsonrpc": "2.0", "error": {"code": -32700, "message": "parse error"}}).encode()
-    if isinstance(obj, list):
-        resp = [_handle_rpc_call(x) for x in obj]
-    else:
-        resp = _handle_rpc_call(obj)
-    return json.dumps(resp).encode()
+    return RPC.rpc_response_bytes(METHODS, data, log)
 
 # -----------------------------
 # HTTP /rpc
@@ -946,7 +864,7 @@ async def rpc_endpoint(request: Request) -> JSONResponse:
                 HTTP_RPC_METHODS[body.get("method")] += 1
                 try:
                     ip = request.client.host if request.client else "?"
-                    _add_recent_http(ip, body.get("method"), "POST")
+                    MET.add_recent_http(now_ts(), ip, body.get("method"), "POST")
                 except Exception:
                     pass
         else:
@@ -962,7 +880,7 @@ async def rpc_endpoint(request: Request) -> JSONResponse:
             try:
                 if isinstance(item, dict) and item.get("method"):
                     ip = request.client.host if request.client else "?"
-                    _add_recent_http(ip, item.get("method"), "POST")
+                    MET.add_recent_http(now_ts(), ip, item.get("method"), "POST")
             except Exception:
                 pass
             resp.append(r)
@@ -997,7 +915,7 @@ async def rpc_get(request: Request) -> JSONResponse:
             ip = request.client.host if request.client else "?"
             for item in batch:
                 if isinstance(item, dict) and item.get("method"):
-                    _add_recent_http(ip, item.get("method"), "GET")
+                    MET.add_recent_http(now_ts(), ip, item.get("method"), "GET")
         except Exception:
             pass
         return JSONResponse(results)
@@ -1011,7 +929,7 @@ async def rpc_get(request: Request) -> JSONResponse:
         pass
     try:
         ip = request.client.host if request.client else "?"
-        _add_recent_http(ip, method, "GET")
+        MET.add_recent_http(now_ts(), ip, method, "GET")
     except Exception:
         pass
     # Build params: prefer explicit JSON in 'params', else use remaining query items
@@ -1061,7 +979,7 @@ async def rpc_get_method(method: str, request: Request) -> JSONResponse:
             results.append(res.get("result", res))
         try:
             ip = request.client.host if request.client else "?"
-            _add_recent_http(ip, method, "GET")
+            MET.add_recent_http(now_ts(), ip, method, "GET")
         except Exception:
             pass
         return JSONResponse(results)
@@ -1072,7 +990,7 @@ async def rpc_get_method(method: str, request: Request) -> JSONResponse:
         pass
     try:
         ip = request.client.host if request.client else "?"
-        _add_recent_http(ip, method, "GET")
+        MET.add_recent_http(now_ts(), ip, method, "GET")
     except Exception:
         pass
     params: Dict[str, Any] = {}
@@ -1103,53 +1021,11 @@ def healthz():
 
 @app.get("/metrics")
 def metrics():
-    lines = []
-    # HTTP
-    total_http = sum(HTTP_RPC_METHODS.values())
-    lines.append("# HELP virtual_shelly_http_rpc_requests_total Total HTTP RPC requests")
-    lines.append("# TYPE virtual_shelly_http_rpc_requests_total counter")
-    lines.append(f"virtual_shelly_http_rpc_requests_total {total_http}")
-    for m, v in HTTP_RPC_METHODS.items():
-        lines.append(f'virtual_shelly_http_rpc_requests_total{{method="{m}"}} {v}')
-    lines.append("# HELP virtual_shelly_http_rpc_errors_total Total HTTP RPC errors")
-    lines.append("# TYPE virtual_shelly_http_rpc_errors_total counter")
-    for m, v in HTTP_RPC_ERRORS.items():
-        lines.append(f'virtual_shelly_http_rpc_errors_total{{method="{m}"}} {v}')
-    # WS
-    lines.append("# HELP virtual_shelly_ws_rpc_messages_total Total WS RPC messages received")
-    lines.append("# TYPE virtual_shelly_ws_rpc_messages_total counter")
-    lines.append(f"virtual_shelly_ws_rpc_messages_total {WS_RPC_MESSAGES}")
-    lines.append("# HELP virtual_shelly_ws_notify_total Total WS Notify messages sent")
-    lines.append("# TYPE virtual_shelly_ws_notify_total counter")
-    lines.append(f"virtual_shelly_ws_notify_total {WS_NOTIFY_TOTAL}")
-    lines.append("# HELP virtual_shelly_ws_clients Current WS client connections")
-    lines.append("# TYPE virtual_shelly_ws_clients gauge")
-    lines.append(f"virtual_shelly_ws_clients {len(WS_RPC_CLIENTS)}")
-    # UDP
-    lines.append("# HELP virtual_shelly_udp_packets_total Total UDP packets received")
-    lines.append("# TYPE virtual_shelly_udp_packets_total counter")
-    lines.append(f"virtual_shelly_udp_packets_total {UDP_PACKETS_TOTAL}")
-    lines.append("# HELP virtual_shelly_udp_replies_total Total UDP replies sent")
-    lines.append("# TYPE virtual_shelly_udp_replies_total counter")
-    lines.append(f"virtual_shelly_udp_replies_total {UDP_REPLIES_TOTAL}")
-    return PlainTextResponse("\n".join(lines))
+    return PlainTextResponse(MET.metrics_text(len(WS_RPC_CLIENTS)))
 
 
 @app.get("/admin/overview")
 def admin_overview():
-    # Aggregate a compact JSON for the UI
-    try:
-        device = VM.build_device_info()
-    except Exception:
-        device = {"id": DEVICE_ID, "model": MODEL, "ver": FIRMWARE}
-    try:
-        em = VM.em_get_status({"id": 0})
-    except Exception:
-        em = {}
-    try:
-        emdata = VM.emdata_get_status({"id": 0})
-    except Exception:
-        emdata = {}
     # WS connected IPs (best-effort)
     ws_ips: List[str] = []
     try:
@@ -1164,44 +1040,7 @@ def admin_overview():
                 pass
     except Exception:
         pass
-    with RECENT_LOCK:
-        http_recent = list(RECENT_HTTP)[-20:]
-        ws_recent = list(RECENT_WS)[-20:]
-        udp_recent = list(RECENT_UDP)[-20:]
-        http_unique = sorted({x.get("ip") for x in RECENT_HTTP if isinstance(x, dict) and x.get("ip")})
-        ws_unique = sorted({x.get("ip") for x in RECENT_WS if isinstance(x, dict) and x.get("ip")})
-        udp_unique = sorted({x.get("ip") for x in RECENT_UDP if isinstance(x, dict) and x.get("ip")})
-    data = {
-        "device": {k: device.get(k) for k in ("id", "model", "ver", "app") if k in device},
-        "values": {"em": em, "emdata": emdata},
-        "metrics": {
-            "http": {
-                "total": int(sum(HTTP_RPC_METHODS.values())),
-                "by_method": dict(HTTP_RPC_METHODS),
-                "errors": dict(HTTP_RPC_ERRORS),
-            },
-            "ws": {
-                "rpc_messages": int(WS_RPC_MESSAGES),
-                "notify_total": int(WS_NOTIFY_TOTAL),
-                "clients": int(len(WS_RPC_CLIENTS)),
-            },
-            "udp": {
-                "packets": int(UDP_PACKETS_TOTAL),
-                "replies": int(UDP_REPLIES_TOTAL),
-            },
-        },
-        "clients": {
-            "http_recent": http_recent,
-            "ws_recent": ws_recent,
-            "udp_recent": udp_recent,
-            "ws_connected": ws_ips,
-            "http_unique": http_unique,
-            "ws_unique": ws_unique,
-            "udp_unique": udp_unique,
-        },
-        "ts": now_ts(),
-    }
-    return JSONResponse(data)
+    return JSONResponse(MET.build_admin_overview(VM, ws_ips, now_ts))
 
 @app.get("/")
 def root():
@@ -1394,7 +1233,7 @@ def ui_page():
 </body>
 </html>
 """
-    return HTMLResponse(html)
+    return HTMLResponse(UI.dashboard_html())
 
 @app.get("/shelly")
 def shelly_http_info():
@@ -1459,8 +1298,7 @@ def poll_loop():
                 if changed:
                     _enqueue_ws_broadcast(_build_notify_status())
                     try:
-                        global WS_NOTIFY_TOTAL
-                        WS_NOTIFY_TOTAL += 1
+                        MET.WS_NOTIFY_TOTAL += 1
                     except Exception:
                         pass
                     _last_notify_values = current
@@ -1485,7 +1323,7 @@ async def ws_handler(websocket):
     # Track connect
     try:
         _register_request_ip(remote)
-        _add_recent_ws(remote or "?", "connect")
+        MET.add_recent_ws(now_ts(), remote or "?", "connect")
     except Exception:
         pass
     try:
@@ -1499,14 +1337,14 @@ async def ws_handler(websocket):
                         method = obj.get("method")
                 except Exception:
                     method = None
-                _add_recent_ws(remote or "?", "message", method)
+                MET.add_recent_ws(now_ts(), remote or "?", "message", method)
             except Exception:
                 pass
             resp = _rpc_response_bytes(message.encode()).decode()
             await websocket.send(resp)
     finally:
         try:
-            _add_recent_ws(remote or "?", "disconnect")
+            MET.add_recent_ws(now_ts(), remote or "?", "disconnect")
         except Exception:
             pass
 
@@ -1545,15 +1383,14 @@ async def ws_rpc(websocket: WebSocket):
         pass
     try:
         ip = websocket.client.host if getattr(websocket, "client", None) else "?"
-        _add_recent_ws(ip or "?", "connect")
+        MET.add_recent_ws(now_ts(), ip or "?", "connect")
     except Exception:
         pass
     try:
         while True:
             message = await websocket.receive_text()
             try:
-                global WS_RPC_MESSAGES
-                WS_RPC_MESSAGES += 1
+                MET.WS_RPC_MESSAGES += 1
             except Exception:
                 pass
             try:
@@ -1565,7 +1402,7 @@ async def ws_rpc(websocket: WebSocket):
                         method = obj.get("method")
                 except Exception:
                     method = None
-                _add_recent_ws(ip or "?", "message", method)
+                MET.add_recent_ws(now_ts(), ip or "?", "message", method)
             except Exception:
                 pass
             _register_request_ip(host)
@@ -1587,7 +1424,7 @@ async def ws_rpc(websocket: WebSocket):
             pass
         try:
             ip = websocket.client.host if getattr(websocket, "client", None) else "?"
-            _add_recent_ws(ip or "?", "disconnect")
+            MET.add_recent_ws(now_ts(), ip or "?", "disconnect")
         except Exception:
             pass
 
@@ -1756,19 +1593,40 @@ async def start_udp_servers(ports: List[int], max_size: int):
         for t in transports:
             t.close()
 
-def udp_thread():
-    ports = []
+def _start_udp():
+    # Build ports list
+    ports: List[int] = []
     for token in UDP_PORTS.split(","):
         token = token.strip()
-        if token:
-            try:
-                ports.append(int(token))
-            except ValueError:
-                pass
+        if not token:
+            continue
+        try:
+            ports.append(int(token))
+        except ValueError:
+            pass
     if not ports:
         ports = [1010]
-    asyncio.run(start_udp_servers(ports, UDP_MAX))
-threading.Thread(target=udp_thread, daemon=True).start()
+
+    def on_packet(addr, method_name):
+        try:
+            log.debug("UDP packet from %s method=%s", addr, method_name)
+            MET.UDP_PACKETS_TOTAL += 1
+            ip = addr[0] if isinstance(addr, tuple) else str(addr)
+            MET.add_recent_udp(now_ts(), ip, method_name)
+        except Exception:
+            pass
+
+    def on_reply(_nbytes: int):
+        try:
+            MET.UDP_REPLIES_TOTAL += 1
+        except Exception:
+            pass
+
+    rpc_bytes = lambda data: RPC.rpc_response_bytes(METHODS, data, log)
+    udp_builder = lambda obj: RPC.udp_build_response(VM, DEVICE_ID, obj)
+    UDP.start_udp_thread(ports, UDP_MAX, METHODS, rpc_bytes, udp_builder, on_packet, on_reply)
+
+_start_udp()
 
 # -----------------------------
 # mDNS
