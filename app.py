@@ -113,6 +113,7 @@ CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*")
 # -----------------------------
 # Helpers
 # -----------------------------
+DISABLE_BACKGROUND = os.getenv("DISABLE_BACKGROUND", "").lower() in ("1", "true", "yes")
 def ha_get(entity_id: str) -> Optional[float]:
     if not entity_id:
         return None
@@ -1306,7 +1307,8 @@ def poll_loop():
         except Exception:
             pass
         time.sleep(POLL_INTERVAL)
-threading.Thread(target=poll_loop, daemon=True).start()
+if not DISABLE_BACKGROUND:
+    threading.Thread(target=poll_loop, daemon=True).start()
 
 # -----------------------------
 # WebSockets 6010–6022
@@ -1437,7 +1439,8 @@ async def ws_serve_on_ports(start_port: int, end_port: int):
 
 def ws_thread():
     asyncio.run(ws_serve_on_ports(WS_PORT_START, WS_PORT_END))
-threading.Thread(target=ws_thread, daemon=True).start()
+if not DISABLE_BACKGROUND:
+    threading.Thread(target=ws_thread, daemon=True).start()
 
 # -----------------------------
 # UDP RPC: multi-port (e.g., 1010, 2220)
@@ -1626,7 +1629,8 @@ def _start_udp():
     udp_builder = lambda obj: RPC.udp_build_response(VM, DEVICE_ID, obj)
     UDP.start_udp_thread(ports, UDP_MAX, METHODS, rpc_bytes, udp_builder, on_packet, on_reply)
 
-_start_udp()
+if not DISABLE_BACKGROUND:
+    _start_udp()
 
 # -----------------------------
 # mDNS
@@ -1741,7 +1745,8 @@ def start_mdns():
                 pass
     threading.Thread(target=_register, daemon=True).start()
 
-start_mdns()
+if not DISABLE_BACKGROUND:
+    start_mdns()
 
 # -----------------------------
 # Graceful shutdown: persist energy on SIGTERM/SIGINT

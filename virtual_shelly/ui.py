@@ -19,13 +19,25 @@ def dashboard_html() -> str:
     th { background: #fafafa; font-weight: 600; }
     .muted { color: #666; font-size: 12px; }
     code { background: #f6f8fa; padding: 1px 4px; border-radius: 4px; }
+    .charts { display: grid; grid-template-columns: 1fr; gap: 16px; }
+    .chart-wrap { border: 1px solid #e2e2e2; border-radius: 8px; padding: 12px; }
+    .legend { margin: 6px 0 0 0; font-size: 12px; }
+    .legend span { display: inline-block; margin-right: 12px; }
+    .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; }
   </style>
   <script>
+    // Rolling buffers for graphs (last ~10 minutes at 5s interval = 120 points)
+    const MAX_POINTS = 120;
+    const hist = {
+      ts: [], total: [], a: [], b: [], c: []
+    };
+
     async function fetchOverview() {
       try {
         const res = await fetch('/admin/overview');
         const data = await res.json();
         render(data);
+        updateHistoryAndDraw(data);
       } catch (e) {
         console.error('Fetch error', e);
       }
@@ -109,6 +121,79 @@ def dashboard_html() -> str:
       document.getElementById('udp-uniq-list').innerHTML = udpU.map(ip => `<code>${ip}</code>`).join(', ');
     }
 
+    function pushRolling(arr, v) {
+      arr.push(v);
+      if (arr.length > MAX_POINTS) arr.shift();
+    }
+
+    function updateHistoryAndDraw(d) {
+      const em = (d.values && d.values.em) || {};
+      const total = Number(em.total_act_power ?? 0);
+      const a = Number(em.a_act_power ?? 0);
+      const b = Number(em.b_act_power ?? 0);
+      const c = Number(em.c_act_power ?? 0);
+      const ts = (d.ts || Math.floor(Date.now()/1000));
+      pushRolling(hist.ts, ts);
+      pushRolling(hist.total, total);
+      pushRolling(hist.a, a);
+      pushRolling(hist.b, b);
+      pushRolling(hist.c, c);
+      drawPowerChart();
+    }
+
+    function drawPowerChart() {
+      const canvas = document.getElementById('power-canvas');
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      const W = canvas.width, H = canvas.height;
+      ctx.clearRect(0,0,W,H);
+
+      // Compute Y scale with padding
+      const series = [hist.total, hist.a, hist.b, hist.c];
+      let minV = Infinity, maxV = -Infinity;
+      for (const s of series) {
+        for (const v of s) { if (!Number.isFinite(v)) continue; minV = Math.min(minV, v); maxV = Math.max(maxV, v); }
+      }
+      if (!Number.isFinite(minV) || !Number.isFinite(maxV)) { minV = 0; maxV = 1; }
+      if (minV === maxV) { maxV = minV + 1; }
+      const pad = (maxV - minV) * 0.1;
+      minV -= pad; maxV += pad;
+
+      // Grid
+      ctx.strokeStyle = '#eee'; ctx.lineWidth = 1;
+      const gridLines = 4;
+      for (let i=0;i<=gridLines;i++) {
+        const y = i*(H/gridLines);
+        ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke();
+      }
+
+      // Map function
+      const n = hist.ts.length;
+      const xFor = idx => (n <= 1) ? 0 : (idx/(n-1))*W;
+      const yFor = v => H - ((v - minV)/(maxV - minV))*H;
+
+      // Draw a polyline helper
+      function drawLine(data, color) {
+        if (data.length < 2) return;
+        ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.beginPath();
+        for (let i=0;i<data.length;i++) {
+          const x = xFor(i); const y = yFor(Number(data[i]));
+          if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+        }
+        ctx.stroke();
+      }
+
+      drawLine(hist.total, '#111');
+      drawLine(hist.a, '#e53935');
+      drawLine(hist.b, '#1e88e5');
+      drawLine(hist.c, '#43a047');
+
+      // Axes labels (min/max)
+      ctx.fillStyle = '#666'; ctx.font = '12px sans-serif';
+      ctx.fillText(maxV.toFixed(1)+' W', 4, 12);
+      ctx.fillText(minV.toFixed(1)+' W', 4, H-4);
+    }
+
     window.addEventListener('load', () => {
       fetchOverview();
       setInterval(fetchOverview, 5000);
@@ -151,6 +236,19 @@ def dashboard_html() -> str:
     </div>
   </div>
 
+  <div class="charts">
+    <div class="chart-wrap">
+      <h2>Power — Total and Phases (W)</h2>
+      <canvas id="power-canvas" width="900" height="240"></canvas>
+      <div class="legend">
+        <span><span class="dot" style="background:#111"></span>Total</span>
+        <span><span class="dot" style="background:#e53935"></span>A</span>
+        <span><span class="dot" style="background:#1e88e5"></span>B</span>
+        <span><span class="dot" style="background:#43a047"></span>C</span>
+      </div>
+    </div>
+  </div>
+
   <div class="card" style="margin-top:16px">
     <h2>Unique Clients</h2>
     <div>HTTP: <b id="http-uniq-count">0</b> <span id="http-uniq-list"></span></div>
@@ -186,4 +284,3 @@ def dashboard_html() -> str:
 </body>
 </html>
 """
-
