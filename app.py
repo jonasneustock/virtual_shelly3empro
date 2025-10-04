@@ -1168,6 +1168,9 @@ def admin_overview():
         http_recent = list(RECENT_HTTP)[-20:]
         ws_recent = list(RECENT_WS)[-20:]
         udp_recent = list(RECENT_UDP)[-20:]
+        http_unique = sorted({x.get("ip") for x in RECENT_HTTP if isinstance(x, dict) and x.get("ip")})
+        ws_unique = sorted({x.get("ip") for x in RECENT_WS if isinstance(x, dict) and x.get("ip")})
+        udp_unique = sorted({x.get("ip") for x in RECENT_UDP if isinstance(x, dict) and x.get("ip")})
     data = {
         "device": {k: device.get(k) for k in ("id", "model", "ver", "app") if k in device},
         "values": {"em": em, "emdata": emdata},
@@ -1192,6 +1195,9 @@ def admin_overview():
             "ws_recent": ws_recent,
             "udp_recent": udp_recent,
             "ws_connected": ws_ips,
+            "http_unique": http_unique,
+            "ws_unique": ws_unique,
+            "udp_unique": udp_unique,
         },
         "ts": now_ts(),
     }
@@ -1298,6 +1304,17 @@ def ui_page():
       document.getElementById('udp-recent').innerHTML = listToRows(d.clients?.udp_recent, ['ts','ip','method']);
       const wsCon = (d.clients?.ws_connected || []).map(ip => `<code>${ip}</code>`).join(', ');
       document.getElementById('ws-connected').innerHTML = wsCon || '<span class="muted">None</span>';
+
+      // Unique clients
+      const httpU = d.clients?.http_unique || [];
+      const wsU = d.clients?.ws_unique || [];
+      const udpU = d.clients?.udp_unique || [];
+      document.getElementById('http-uniq-count').textContent = httpU.length;
+      document.getElementById('ws-uniq-count').textContent = wsU.length;
+      document.getElementById('udp-uniq-count').textContent = udpU.length;
+      document.getElementById('http-uniq-list').innerHTML = httpU.map(ip => `<code>${ip}</code>`).join(', ');
+      document.getElementById('ws-uniq-list').innerHTML = wsU.map(ip => `<code>${ip}</code>`).join(', ');
+      document.getElementById('udp-uniq-list').innerHTML = udpU.map(ip => `<code>${ip}</code>`).join(', ');
     }
 
     window.addEventListener('load', () => {
@@ -1340,6 +1357,13 @@ def ui_page():
       <div>UDP: <b id="udp-stats">-</b></div>
       <div style="margin-top:8px">WS Connected: <span id="ws-connected"></span></div>
     </div>
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <h2>Unique Clients</h2>
+    <div>HTTP: <b id="http-uniq-count">0</b> <span id="http-uniq-list"></span></div>
+    <div>WS: <b id="ws-uniq-count">0</b> <span id="ws-uniq-list"></span></div>
+    <div>UDP RPC: <b id="udp-uniq-count">0</b> <span id="udp-uniq-list"></span></div>
   </div>
 
   <div class="grid">
