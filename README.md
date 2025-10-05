@@ -9,7 +9,7 @@ Features
 
 - HTTP API (FastAPI + Uvicorn) with:
   - GET `/shelly`: Gen2 device info (id, app, ver, model, gen, mac, sn, auth flags).
-  - GET `/ui`: Minimal web interface showing current values, recent client IPs, and endpoint metrics (auto-refreshes every 5s).
+  - GET `/ui`: Minimal web interface showing current values, recent client IPs, endpoint metrics, and live power graphs (total + A/B/C) with a rolling 10‑minute window (auto‑refreshes every 5s).
   - POST `/rpc`: JSON‑RPC 2.0 envelope for Shelly.* and EM*/EMData* methods.
   - GET `/rpc?method=...` and GET `/rpc/{method}`: returns the method result directly (no envelope), matching Shelly GET semantics.
   - GET `/healthz` and GET `/`: simple health and info.
@@ -26,7 +26,8 @@ Features
   - Defaults to TCP port 502 with unit ID 1 (configurable via env vars).
 - mDNS service advertisements (`_http._tcp` and `_shelly._tcp`) for discovery.
 - Energy counters integrated from power over time and persisted at `/data/state.json` (via Docker volume).
- - Simple `/metrics` endpoint with Prometheus‑style counters for HTTP/WS/UDP events.
+- Simple `/metrics` endpoint with Prometheus‑style counters for HTTP/WS/UDP events.
+- Admin JSON overview at `/admin/overview` (used by the UI) with current values, metrics, and recent/unique client IPs.
 
 Quick Start (Docker Compose)
 
@@ -51,7 +52,7 @@ Configuration (env vars)
   - `HA_BASE_URL`: e.g. `http://homeassistant:8123` or `http://192.168.x.x:8123`
   - `HA_TOKEN`: HA Long‑Lived Access Token (read‑only)
   - `POLL_INTERVAL`: seconds between polls (default 2.0)
-  - `HA_SMOOTHING_ENABLE`: when `true`, average each sensor reading over the last 5 values
+  - `HA_SMOOTHING_ENABLE`: when `true`, average each sensor reading over the last 5 values (reduces jitter when HA sensors are noisy)
   - Entity IDs (override as needed): `A_POWER`, `B_POWER`, `C_POWER`, `A_VOLT`, `B_VOLT`, `C_VOLT`, `A_CURR`, `B_CURR`, `C_CURR`, `A_PF`, `B_PF`, `C_PF`
 - Device identity
   - `DEVICE_ID`: Device identifier reported in RPC/mDNS (default `shellypro3em-virtual-001`)
@@ -68,6 +69,9 @@ Configuration (env vars)
   - `WS_NOTIFY_EPS`: coalescing threshold in watts; only broadcast when change ≥ EPS (default `0.1`).
   - `CORS_ENABLE`: enable CORS middleware (`true|false`, default `false`).
   - `CORS_ORIGINS`: comma‑separated allowed origins (default `*`).
+- UI & Clients
+  - `RECENT_CLIENTS_MAX`: max recent client records retained for HTTP/WS/UDP lists (default `100`).
+  - `REQUEST_IP_TTL`: seconds to consider a requester "active" for request‑side power scaling (default `30`).
 - UDP RPC
   - `UDP_PORTS`: comma‑separated list (e.g. `1010,2220`) for old/new Shelly Pro 3EM styles
   - `UDP_MAX`: max UDP payload size (bytes)
@@ -84,6 +88,13 @@ Configuration (env vars)
   - `STRICT_MINIMAL_PAYLOAD`: when `true`, HTTP/WS `EM.GetStatus` returns only `{a_act_power,b_act_power,c_act_power,total_act_power}` (some gateways prefer this).
 - Persistence
   - `STATE_PATH`: defaults to `/data/state.json` (mounted via volume in Compose).
+
+Development & Testing
+
+- Run tests: `pytest -q`
+- The test harness disables background threads and network listeners by default:
+  - `DISABLE_BACKGROUND=1` (suppresses poller, WS fan‑out ports, UDP, mDNS)
+  - Tests use a temporary `STATE_PATH` to avoid writes to `/data`.
 
 APIs
 
@@ -134,7 +145,7 @@ Troubleshooting
 
 - Check health: `curl http://<ip>/healthz` (image includes a Docker HEALTHCHECK)
 - Inspect metrics: `curl http://<ip>/metrics`
-- Open the UI: http://<ip>/ui (auto-refresh every 5s)
+- Open the UI: http://<ip>/ui (auto‑refresh every 5s; includes power graphs)
 - Inspect logs: `docker logs -f shelly3em-virtual`
 - Verify endpoints hit by the app (look for GET /shelly, /rpc calls, WS /rpc handshakes).
 - Confirm UDP replies with netcat; try both 1010 and 2220 depending on your consumer.

@@ -9,6 +9,16 @@ Core Compatibility
 
 HTTP Endpoints
 
+UI / Dashboard
+
+- [x] Minimal dashboard at `/ui` with current values and metrics
+- [x] Add live power graphs (total + A/B/C) with 10‑minute rolling window
+- [ ] Add graphs for voltages and currents per phase
+- [ ] Add time window selector (10m/1h/6h) with simple in‑memory buffers
+- [ ] Switch UI polling to WebSocket subscribe (reduce latency/overhead)
+- [ ] Dark mode + responsive layout improvements (mobile friendly)
+- [ ] Export CSV of recent samples from the UI
+
 UDP RPC (b2500 compatibility)
 
 - [ ] Add tests for typical/edge payloads and malformed input; ensure silent ignore on invalid packets.
@@ -19,19 +29,71 @@ mDNS and Discovery
 
 Persistence & Timing
 
+- [ ] Persist recent samples for graph warm‑start after restart (bounded size)
+- [ ] Make `HA_SMOOTHING_WINDOW` configurable via env var
+- [ ] Document and tune request‑side power scaling behaviour; make opt‑out
+
 Configuration & Runtime
+
+- Config management
+  - [ ] Extract config/env parsing into `config.py` (single source of truth)
+  - [ ] Validate config on boot (URLs, entity IDs, ports); fail‑fast with clear logs
+  - [ ] Optional pydantic settings model with `.env` file support (lazy import to avoid runtime bloat)
+  - [ ] Document and group env vars by concern (HA, HTTP/WS, UDP, Modbus, mDNS, UI)
+
+- Runtime controls
+  - [ ] Hot‑reload of config via `/admin/reload` or SIGHUP for non‑critical toggles (CORS, smoothing, STRICT_MINIMAL_PAYLOAD)
+  - [ ] Toggle request‑side power scaling via `REQUEST_SIDE_SCALING_ENABLE` (default on), with `REQUEST_IP_TTL` honored
+  - [ ] Make `HA_SMOOTHING_WINDOW` configurable; allow per‑sensor smoothing overrides
+  - [ ] Honor `DISABLE_BACKGROUND` in docs and example Compose for testing
+  - [ ] Graceful shutdown improvements: persist state, close WS/UDP sockets, unregister mDNS, flush Modbus image
+
+- Network & bindings
+  - [ ] Separate bind addresses for HTTP, WS fan‑out, UDP, Modbus (env)
+  - [ ] TLS guidance (reverse proxy example with Caddy/Traefik/Nginx); optional uvicorn TLS flags for lab use
+  - [ ] Timeouts and max body size for HTTP/WS; harden against oversized payloads
+
+- AuthN/AuthZ & security
+  - [ ] Optional basic auth for `/ui` and `/admin/overview` (LAN‑only by default)
+  - [ ] Optional token for `/rpc` (header or query), disabled by default to preserve Shelly‑like behavior
+  - [ ] IP allow/deny lists for HTTP/WS/UDP endpoints
+
+- Rate limiting & QoS
+  - [ ] Lightweight per‑IP rate limiting for `/rpc` HTTP and WS messages
+  - [ ] Backpressure and debounce options for WS Notify broadcasts
+
+- Resilience
+  - [ ] HA polling: exponential backoff/jitter, mark sensors unavailable on sustained failures
+  - [ ] Surface upstream status in `/shelly` and `/admin/overview` (e.g., `ha_connected: true/false`)
+  - [ ] Retries + timeouts for HA requests (move to `httpx` async client with connection pool)
+
+- CORS & headers
+  - [ ] Expand CORS config (regex/explicit origin list); document preflight behavior
+  - [ ] Security headers for `/ui` (CSP optional, no inline eval)
+
+- CLI & args
+  - [ ] Optional CLI flags to override env (port, bind, log‑level) for non‑Docker runs
+
+- Safety limits
+  - [ ] Enforce caps on `UDP_MAX` and WS message sizes; sanitize RPC input fields
+
+- mDNS & Modbus
+  - [ ] mDNS: TTL and interface selection configurable; auto‑refresh on IP change (already present) with logging
+  - [ ] Modbus: explicit error handling when port in use; configurable unit ID/port/bind via config module
+
 
 Observability & Logging
 
 - [x] Structured logs with levels; concise request summaries for /rpc, ws:/rpc, UDP.
 - [x] Optional /metrics (Prometheus) for basic counters (requests, errors).
+- [ ] Add request latency histograms and p95/p99 to /metrics
 
 Testing
 
-- [ ] Unit tests
-  - [ ] UDP response builder (rounding/decimal rules, EM and EM1).
-  - [ ] HTTP GET/POST /rpc and GET /shelly payloads.
-  - [ ] WS connect + initial notify; broadcast on poll.
+- [x] Unit tests
+  - [x] UDP response builder (rounding/decimal rules, EM and EM1).
+  - [x] HTTP GET/POST /rpc (partial); add `/shelly` payload coverage.
+  - [x] WS connect + initial notify; (broadcast on poll still to cover).
   - [ ] Energy integration over simulated dt and persistence cycle.
 - [ ] Integration tests
   - [ ] End‑to‑end add‑by‑IP flow matching Shelly app expectations (where possible).
@@ -44,8 +106,31 @@ Documentation
 
 Docker & CI
 
-- [ ] Multi‑arch images and GHCR publish workflow (GitHub Actions).
-- [ ] Optionally expose timezone/env configuration and log formatting flags.
+- Docker image & Compose
+  - [ ] Multi‑arch images (linux/amd64, linux/arm64) using buildx
+  - [ ] Slimmer multi‑stage Dockerfile (non‑root user, read‑only FS, drop caps)
+  - [ ] Add HEALTHCHECK and OCI labels (org.opencontainers.image.*)
+  - [ ] Optional timezone/env/log formatting flags surfaced via env
+  - [ ] Example Compose files: host networking vs. bridged with UDP ports
+  - [ ] Document volume for `/data` and minimal permissions
+  - [ ] Hadolint check for Dockerfile
+- Build, Publish, Security
+  - [ ] GH Actions: build matrix, cache, push to GHCR (and optional Docker Hub)
+  - [ ] Tagging: semver (`vX.Y.Z`), `latest`, and git SHA tags
+  - [ ] SBOM generation (syft) and image signing (cosign)
+  - [ ] Vulnerability scan (Trivy/Grype) gate on critical/high
+- CLI tooling
+  - [ ] Python CLI (`vshelly`) to interact with the service:
+    - [ ] `status` (HTTP/WS), `reset`, `metrics`, `discover`, `udp-test`, `ws-tail`
+  - [ ] Package to PyPI with console‑script entrypoint; support `pipx install`
+  - [ ] Shell completions (bash/zsh/fish) and `--help` docs
+  - [ ] Example snippets for common flows (reset, watch total power)
+  - [ ] CLI integration tests against ephemeral TestClient/uvicorn
+- CI pipeline
+  - [ ] Lint (ruff/flake8), format (black), import sort (isort)
+  - [ ] Type‑check (mypy) and unit/integration test matrix (Py 3.11/3.12)
+  - [ ] Coverage upload (Codecov) and artifacts (SBOM, reports)
+  - [ ] Release workflow to cut tags, build images, publish packages
 
 Known Limitations (to revisit)
 
