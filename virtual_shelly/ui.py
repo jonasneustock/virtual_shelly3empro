@@ -27,16 +27,18 @@ def dashboard_html() -> str:
   </style>
   <script>
     // Rolling buffers for graphs (last ~10 minutes at 5s interval = 120 points)
-    const MAX_POINTS = 120;
-    const hist = {
-      ts: [], total: [], a: [], b: [], c: []
-    };
+    let MAX_POINTS = 120; // dynamic window
+    const hist = { ts: [], total: [], a: [], b: [], c: [],
+                   va: [], vb: [], vc: [], ia: [], ib: [], ic: [] };
 
     async function fetchOverview() {
       try {
         const res = await fetch('/admin/overview');
         const data = await res.json();
         render(data);
+        if (data.history && Array.isArray(data.history) && hist.ts.length === 0) {
+          seedHistory(data.history);
+        }
         updateHistoryAndDraw(data);
       } catch (e) {
         console.error('Fetch error', e);
@@ -126,6 +128,16 @@ def dashboard_html() -> str:
       if (arr.length > MAX_POINTS) arr.shift();
     }
 
+    function seedHistory(history) {
+      for (const s of history) {
+        pushRolling(hist.ts, s.ts);
+        pushRolling(hist.total, Number(s.total||0));
+        pushRolling(hist.a, Number(s.a||0));
+        pushRolling(hist.b, Number(s.b||0));
+        pushRolling(hist.c, Number(s.c||0));
+      }
+    }
+
     function updateHistoryAndDraw(d) {
       const em = (d.values && d.values.em) || {};
       const total = Number(em.total_act_power ?? 0);
@@ -138,7 +150,14 @@ def dashboard_html() -> str:
       pushRolling(hist.a, a);
       pushRolling(hist.b, b);
       pushRolling(hist.c, c);
+      // Voltages & currents (client-side only)
+      const va = Number(em.a_voltage ?? 0), vb = Number(em.b_voltage ?? 0), vc = Number(em.c_voltage ?? 0);
+      const ia = Number(em.a_current ?? 0), ib = Number(em.b_current ?? 0), ic = Number(em.c_current ?? 0);
+      pushRolling(hist.va, va); pushRolling(hist.vb, vb); pushRolling(hist.vc, vc);
+      pushRolling(hist.ia, ia); pushRolling(hist.ib, ib); pushRolling(hist.ic, ic);
       drawPowerChart();
+      drawVoltageChart();
+      drawCurrentChart();
     }
 
     function drawPowerChart() {
@@ -194,6 +213,39 @@ def dashboard_html() -> str:
       ctx.fillText(minV.toFixed(1)+' W', 4, H-4);
     }
 
+    function drawSeries(canvasId, unit, seriesDefs) {
+      const canvas = document.getElementById(canvasId);
+      if (!canvas) return; const ctx = canvas.getContext('2d');
+      const W = canvas.width, H = canvas.height; ctx.clearRect(0,0,W,H);
+      let minV = Infinity, maxV = -Infinity;
+      for (const s of seriesDefs) {
+        for (const v of s.data) { if (!Number.isFinite(v)) continue; minV = Math.min(minV, v); maxV = Math.max(maxV, v); }
+      }
+      if (!Number.isFinite(minV) || !Number.isFinite(maxV)) { minV = 0; maxV = 1; }
+      if (minV === maxV) { maxV = minV + 1; }
+      const pad = (maxV - minV) * 0.1; minV -= pad; maxV += pad;
+      // Grid
+      ctx.strokeStyle = '#eee'; ctx.lineWidth = 1; const gridLines = 4;
+      for (let i=0;i<=gridLines;i++) { const y = i*(H/gridLines); ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke(); }
+      const n = hist.ts.length; const xFor = idx => (n <= 1) ? 0 : (idx/(n-1))*W; const yFor = v => H - ((v - minV)/(maxV - minV))*H;
+      function drawLine(data, color) { if (data.length<2) return; ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.beginPath(); for (let i=0;i<data.length;i++){ const x=xFor(i), y=yFor(Number(data[i])); if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);} ctx.stroke(); }
+      for (const s of seriesDefs) drawLine(s.data, s.color);
+      ctx.fillStyle = '#666'; ctx.font = '12px sans-serif'; ctx.fillText(maxV.toFixed(1)+' '+unit, 4, 12); ctx.fillText(minV.toFixed(1)+' '+unit, 4, H-4);
+    }
+
+    function drawVoltageChart(){ drawSeries('volt-canvas', 'V', [
+      {data: hist.va, color:'#e53935'},
+      {data: hist.vb, color:'#1e88e5'},
+      {data: hist.vc, color:'#43a047'},
+    ]); }
+    function drawCurrentChart(){ drawSeries('curr-canvas', 'A', [
+      {data: hist.ia, color:'#e53935'},
+      {data: hist.ib, color:'#1e88e5'},
+      {data: hist.ic, color:'#43a047'},
+    ]); }
+
+    function setWindow(points){ MAX_POINTS = points; /* arrays will roll automatically */ }
+
     window.addEventListener('load', () => {
       fetchOverview();
       setInterval(fetchOverview, 5000);
@@ -239,9 +291,28 @@ def dashboard_html() -> str:
   <div class="charts">
     <div class="chart-wrap">
       <h2>Power — Total and Phases (W)</h2>
+      <div class="muted">Window: <select onchange="setWindow(parseInt(this.value,10))"><option value="120" selected>10m</option><option value="720">1h</option><option value="4320">6h</option></select></div>
       <canvas id="power-canvas" width="900" height="240"></canvas>
       <div class="legend">
         <span><span class="dot" style="background:#111"></span>Total</span>
+        <span><span class="dot" style="background:#e53935"></span>A</span>
+        <span><span class="dot" style="background:#1e88e5"></span>B</span>
+        <span><span class="dot" style="background:#43a047"></span>C</span>
+      </div>
+    </div>
+    <div class="chart-wrap">
+      <h2>Voltage — Phases (V)</h2>
+      <canvas id="volt-canvas" width="900" height="240"></canvas>
+      <div class="legend">
+        <span><span class="dot" style="background:#e53935"></span>A</span>
+        <span><span class="dot" style="background:#1e88e5"></span>B</span>
+        <span><span class="dot" style="background:#43a047"></span>C</span>
+      </div>
+    </div>
+    <div class="chart-wrap">
+      <h2>Current — Phases (A)</h2>
+      <canvas id="curr-canvas" width="900" height="240"></canvas>
+      <div class="legend">
         <span><span class="dot" style="background:#e53935"></span>A</span>
         <span><span class="dot" style="background:#1e88e5"></span>B</span>
         <span><span class="dot" style="background:#43a047"></span>C</span>

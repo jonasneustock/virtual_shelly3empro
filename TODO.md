@@ -13,8 +13,8 @@ UI / Dashboard
 
 - [x] Minimal dashboard at `/ui` with current values and metrics
 - [x] Add live power graphs (total + A/B/C) with 10‑minute rolling window
-- [ ] Add graphs for voltages and currents per phase
-- [ ] Add time window selector (10m/1h/6h) with simple in‑memory buffers
+- [x] Add graphs for voltages and currents per phase
+- [x] Add time window selector (10m/1h/6h) with simple in‑memory buffers
 - [ ] Switch UI polling to WebSocket subscribe (reduce latency/overhead)
 - [ ] Dark mode + responsive layout improvements (mobile friendly)
 - [ ] Export CSV of recent samples from the UI
@@ -22,6 +22,8 @@ UI / Dashboard
 UDP RPC (b2500 compatibility)
 
 - [ ] Add tests for typical/edge payloads and malformed input; ensure silent ignore on invalid packets.
+  - [x] Typical payloads (EM.GetStatus, EM1.GetStatus) covered
+  - [ ] Malformed/oversize payloads and silent ignore behavior
 
 mDNS and Discovery
 
@@ -30,8 +32,10 @@ mDNS and Discovery
 Persistence & Timing
 
 - [ ] Persist recent samples for graph warm‑start after restart (bounded size)
-- [ ] Make `HA_SMOOTHING_WINDOW` configurable via env var
-- [ ] Document and tune request‑side power scaling behaviour; make opt‑out
+- [x] Make `HA_SMOOTHING_WINDOW` configurable via env var
+- [ ] Document and tune request‑side power scaling behaviour
+  - [x] Implement opt‑out flag `REQUEST_SIDE_SCALING_ENABLE`
+  - [ ] Expand README docs and examples
 
 Configuration & Runtime
 
@@ -43,8 +47,8 @@ Configuration & Runtime
 
 - Runtime controls
   - [ ] Hot‑reload of config via `/admin/reload` or SIGHUP for non‑critical toggles (CORS, smoothing, STRICT_MINIMAL_PAYLOAD)
-  - [ ] Toggle request‑side power scaling via `REQUEST_SIDE_SCALING_ENABLE` (default on), with `REQUEST_IP_TTL` honored
-  - [ ] Make `HA_SMOOTHING_WINDOW` configurable; allow per‑sensor smoothing overrides
+  - [x] Toggle request‑side power scaling via `REQUEST_SIDE_SCALING_ENABLE` (default on), with `REQUEST_IP_TTL` honored
+  - [x] Make `HA_SMOOTHING_WINDOW` configurable; allow per‑sensor smoothing overrides
   - [ ] Honor `DISABLE_BACKGROUND` in docs and example Compose for testing
   - [ ] Graceful shutdown improvements: persist state, close WS/UDP sockets, unregister mDNS, flush Modbus image
 
@@ -54,12 +58,12 @@ Configuration & Runtime
   - [ ] Timeouts and max body size for HTTP/WS; harden against oversized payloads
 
 - AuthN/AuthZ & security
-  - [ ] Optional basic auth for `/ui` and `/admin/overview` (LAN‑only by default)
+  - [x] Optional basic auth for `/ui` and `/admin/overview` (LAN‑only by default)
   - [ ] Optional token for `/rpc` (header or query), disabled by default to preserve Shelly‑like behavior
   - [ ] IP allow/deny lists for HTTP/WS/UDP endpoints
 
 - Rate limiting & QoS
-  - [ ] Lightweight per‑IP rate limiting for `/rpc` HTTP and WS messages
+  - [x] Lightweight per‑IP rate limiting for `/rpc` HTTP (GET/POST)
   - [ ] Backpressure and debounce options for WS Notify broadcasts
 
 - Resilience
@@ -86,7 +90,8 @@ Observability & Logging
 
 - [x] Structured logs with levels; concise request summaries for /rpc, ws:/rpc, UDP.
 - [x] Optional /metrics (Prometheus) for basic counters (requests, errors).
-- [ ] Add request latency histograms and p95/p99 to /metrics
+- [x] Add request latency histograms to /metrics
+- [ ] Add p95/p99 summaries to /metrics
 
 Testing
 

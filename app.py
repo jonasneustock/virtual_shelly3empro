@@ -12,13 +12,15 @@ from typing import Dict, Any, Optional, List, Tuple, Deque
 from collections import defaultdict, deque
 
 import requests
-from fastapi import FastAPI, Request, WebSocket
+from fastapi import FastAPI, Request, WebSocket, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse, PlainTextResponse, HTMLResponse
+import time as _time
 from virtual_shelly import metrics as MET
 from virtual_shelly import ui as UI
 from virtual_shelly import rpc_core as RPC
 from virtual_shelly import udp_server as UDP
+from virtual_shelly import timeseries as TS
 
 # mDNS
 from zeroconf import Zeroconf, ServiceInfo, InterfaceChoice
@@ -100,6 +102,11 @@ MODBUS_UNIT_ID = int(os.getenv("MODBUS_UNIT_ID", "1"))
 
 # Payload shape tweak (Marstek/Hoymiles consumers)
 STRICT_MINIMAL_PAYLOAD = os.getenv("STRICT_MINIMAL_PAYLOAD", "false").lower() in ("1", "true", "yes")
+REQUEST_SIDE_SCALING_ENABLE = os.getenv("REQUEST_SIDE_SCALING_ENABLE", "true").lower() in ("1", "true", "yes")
+try:
+    HA_SMOOTHING_WINDOW = int(os.getenv("HA_SMOOTHING_WINDOW", str(5)))
+except Exception:
+    HA_SMOOTHING_WINDOW = 5
 
 # WS notify throttle (seconds)
 WS_NOTIFY_INTERVAL = float(os.getenv("WS_NOTIFY_INTERVAL", "2.0"))
@@ -114,6 +121,28 @@ CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*")
 # Helpers
 # -----------------------------
 DISABLE_BACKGROUND = os.getenv("DISABLE_BACKGROUND", "").lower() in ("1", "true", "yes")
+BASIC_AUTH_ENABLE = os.getenv("BASIC_AUTH_ENABLE", "false").lower() in ("1", "true", "yes")
+BASIC_AUTH_USER = os.getenv("BASIC_AUTH_USER")
+BASIC_AUTH_PASSWORD = os.getenv("BASIC_AUTH_PASSWORD")
+def _require_basic_auth(request: Request):
+    if (not BASIC_AUTH_ENABLE) or DISABLE_BACKGROUND:
+        return True
+    import secrets, base64
+    if not BASIC_AUTH_USER or not BASIC_AUTH_PASSWORD:
+        raise HTTPException(status_code=401, detail="Unauthorized", headers={"WWW-Authenticate": "Basic"})
+    auth = request.headers.get("authorization") or request.headers.get("Authorization")
+    if not auth or not auth.lower().startswith("basic "):
+        raise HTTPException(status_code=401, detail="Unauthorized", headers={"WWW-Authenticate": "Basic"})
+    try:
+        raw = base64.b64decode(auth.split(" ",1)[1]).decode("utf-8", errors="ignore")
+        username, password = raw.split(":",1)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Unauthorized", headers={"WWW-Authenticate": "Basic"})
+    ok_user = secrets.compare_digest(username or "", BASIC_AUTH_USER)
+    ok_pass = secrets.compare_digest(password or "", BASIC_AUTH_PASSWORD)
+    if not (ok_user and ok_pass):
+        raise HTTPException(status_code=401, detail="Unauthorized", headers={"WWW-Authenticate": "Basic"})
+    return True
 def ha_get(entity_id: str) -> Optional[float]:
     if not entity_id:
         return None
@@ -171,6 +200,8 @@ def _active_request_ip_count() -> int:
 
 
 def _apply_request_side_power_scaling(powers: Tuple[float, float, float]) -> Tuple[float, float, float]:
+    if not REQUEST_SIDE_SCALING_ENABLE:
+        return powers
     total = sum(powers)
     if total == 0:
         return powers
@@ -853,9 +884,37 @@ def _rpc_response_bytes(data: bytes) -> bytes:
 # -----------------------------
 # HTTP /rpc
 # -----------------------------
+# Simple rate limiting
+RATE_LIMIT_ENABLE = os.getenv("RATE_LIMIT_ENABLE", "false").lower() in ("1","true","yes")
+try:
+    RATE_LIMIT_RPCS_PER_10S = int(os.getenv("RATE_LIMIT_RPCS_PER_10S", "120"))
+except Exception:
+    RATE_LIMIT_RPCS_PER_10S = 120
+_RL_LOCK = threading.RLock()
+_RL_BUCKETS = defaultdict(list)  # ip -> [timestamps]
+
+def _rate_limit_check(ip: Optional[str]) -> Optional[JSONResponse]:
+    if not RATE_LIMIT_ENABLE:
+        return None
+    if not ip:
+        return None
+    now = _time.monotonic()
+    window = 10.0
+    with _RL_LOCK:
+        arr = _RL_BUCKETS[ip]
+        # drop old
+        _RL_BUCKETS[ip] = [t for t in arr if (now - t) <= window]
+        if len(_RL_BUCKETS[ip]) >= RATE_LIMIT_RPCS_PER_10S:
+            return JSONResponse({"error": "rate limit exceeded"}, status_code=429)
+        _RL_BUCKETS[ip].append(now)
+    return None
 @app.post("/rpc")
 async def rpc_endpoint(request: Request) -> JSONResponse:
+    start = _time.perf_counter()
     client_host = getattr(request.client, "host", None) if request.client else None
+    rl = _rate_limit_check(client_host)
+    if rl is not None:
+        return rl
     _register_request_ip(client_host)
     body = await request.json()
     try:
@@ -885,17 +944,41 @@ async def rpc_endpoint(request: Request) -> JSONResponse:
             except Exception:
                 pass
             resp.append(r)
+        rtime = _time.perf_counter() - start
+        try:
+            MET.RPC_LATENCY_COUNT += 1
+            MET.RPC_LATENCY_SUM += rtime
+            for b in MET.RPC_LATENCY_BUCKETS:
+                if rtime <= b:
+                    MET.RPC_LATENCY_HIST[b] += 1
+                    break
+        except Exception:
+            pass
         return JSONResponse(resp)
     else:
         r = _handle_rpc_call(body)
         if isinstance(body, dict) and body.get("method") and "error" in r:
             HTTP_RPC_ERRORS[body.get("method")] += 1
+        rtime = _time.perf_counter() - start
+        try:
+            MET.RPC_LATENCY_COUNT += 1
+            MET.RPC_LATENCY_SUM += rtime
+            for b in MET.RPC_LATENCY_BUCKETS:
+                if rtime <= b:
+                    MET.RPC_LATENCY_HIST[b] += 1
+                    break
+        except Exception:
+            pass
         return JSONResponse(r)
 
 @app.get("/rpc")
 async def rpc_get(request: Request) -> JSONResponse:
+    start = _time.perf_counter()
     # Support GET-style RPC: /rpc?method=EM.GetStatus&id=0 or /rpc?method=Shelly.GetConfig
     client_host = getattr(request.client, "host", None) if request.client else None
+    rl = _rate_limit_check(client_host)
+    if rl is not None:
+        return rl
     _register_request_ip(client_host)
     qp = dict(request.query_params)
     # Batch GET support via ?batch=[{...},{...}]
@@ -917,6 +1000,16 @@ async def rpc_get(request: Request) -> JSONResponse:
             for item in batch:
                 if isinstance(item, dict) and item.get("method"):
                     MET.add_recent_http(now_ts(), ip, item.get("method"), "GET")
+        except Exception:
+            pass
+        rtime = _time.perf_counter() - start
+        try:
+            MET.RPC_LATENCY_COUNT += 1
+            MET.RPC_LATENCY_SUM += rtime
+            for b in MET.RPC_LATENCY_BUCKETS:
+                if rtime <= b:
+                    MET.RPC_LATENCY_HIST[b] += 1
+                    break
         except Exception:
             pass
         return JSONResponse(results)
@@ -956,13 +1049,37 @@ async def rpc_get(request: Request) -> JSONResponse:
     resp = _handle_rpc_call(req)
     # Return only the result to mimic Shelly GET semantics
     if "result" in resp:
+        rtime = _time.perf_counter() - start
+        try:
+            MET.RPC_LATENCY_COUNT += 1
+            MET.RPC_LATENCY_SUM += rtime
+            for b in MET.RPC_LATENCY_BUCKETS:
+                if rtime <= b:
+                    MET.RPC_LATENCY_HIST[b] += 1
+                    break
+        except Exception:
+            pass
         return JSONResponse(resp["result"])
+    rtime = _time.perf_counter() - start
+    try:
+        MET.RPC_LATENCY_COUNT += 1
+        MET.RPC_LATENCY_SUM += rtime
+        for b in MET.RPC_LATENCY_BUCKETS:
+            if rtime <= b:
+                MET.RPC_LATENCY_HIST[b] += 1
+                break
+    except Exception:
+        pass
     return JSONResponse(resp, status_code=400)
 
 @app.get("/rpc/{method}")
 async def rpc_get_method(method: str, request: Request) -> JSONResponse:
+    start = _time.perf_counter()
     # Support GET-style RPC: /rpc/EM.GetStatus?id=0
     client_host = getattr(request.client, "host", None) if request.client else None
+    rl = _rate_limit_check(client_host)
+    if rl is not None:
+        return rl
     _register_request_ip(client_host)
     qp = dict(request.query_params)
     if "batch" in qp:
@@ -981,6 +1098,16 @@ async def rpc_get_method(method: str, request: Request) -> JSONResponse:
         try:
             ip = request.client.host if request.client else "?"
             MET.add_recent_http(now_ts(), ip, method, "GET")
+        except Exception:
+            pass
+        rtime = _time.perf_counter() - start
+        try:
+            MET.RPC_LATENCY_COUNT += 1
+            MET.RPC_LATENCY_SUM += rtime
+            for b in MET.RPC_LATENCY_BUCKETS:
+                if rtime <= b:
+                    MET.RPC_LATENCY_HIST[b] += 1
+                    break
         except Exception:
             pass
         return JSONResponse(results)
@@ -1013,7 +1140,27 @@ async def rpc_get_method(method: str, request: Request) -> JSONResponse:
     req = {"id": None, "method": method, "params": params}
     resp = _handle_rpc_call(req)
     if "result" in resp:
+        rtime = _time.perf_counter() - start
+        try:
+            MET.RPC_LATENCY_COUNT += 1
+            MET.RPC_LATENCY_SUM += rtime
+            for b in MET.RPC_LATENCY_BUCKETS:
+                if rtime <= b:
+                    MET.RPC_LATENCY_HIST[b] += 1
+                    break
+        except Exception:
+            pass
         return JSONResponse(resp["result"])
+    rtime = _time.perf_counter() - start
+    try:
+        MET.RPC_LATENCY_COUNT += 1
+        MET.RPC_LATENCY_SUM += rtime
+        for b in MET.RPC_LATENCY_BUCKETS:
+            if rtime <= b:
+                MET.RPC_LATENCY_HIST[b] += 1
+                break
+    except Exception:
+        pass
     return JSONResponse(resp, status_code=400)
 
 @app.get("/healthz")
@@ -1026,7 +1173,7 @@ def metrics():
 
 
 @app.get("/admin/overview")
-def admin_overview():
+def admin_overview(_auth: bool = Depends(_require_basic_auth)):
     # WS connected IPs (best-effort)
     ws_ips: List[str] = []
     try:
@@ -1041,7 +1188,12 @@ def admin_overview():
                 pass
     except Exception:
         pass
-    return JSONResponse(MET.build_admin_overview(VM, ws_ips, now_ts))
+    data = MET.build_admin_overview(VM, ws_ips, now_ts)
+    try:
+        data["history"] = TS.get_history(limit=120)
+    except Exception:
+        pass
+    return JSONResponse(data)
 
 @app.get("/")
 def root():
@@ -1049,7 +1201,7 @@ def root():
 
 
 @app.get("/ui")
-def ui_page():
+def ui_page(_auth: bool = Depends(_require_basic_auth)):
     html = """
 <!doctype html>
 <html lang=\"en\">
@@ -1288,6 +1440,10 @@ def poll_loop():
                     c = VM.phases["c"].act_power or 0.0
                 total = a + b + c
                 current = (a, b, c, total)
+                try:
+                    TS.add_sample(now_ts(), a, b, c, total)
+                except Exception:
+                    pass
                 changed = False
                 if _last_notify_values is None:
                     changed = True

@@ -15,6 +15,12 @@ WS_RPC_MESSAGES = 0
 UDP_PACKETS_TOTAL = 0
 UDP_REPLIES_TOTAL = 0
 
+# Latency histograms (seconds) for HTTP /rpc
+RPC_LATENCY_BUCKETS = [0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0]
+RPC_LATENCY_HIST = defaultdict(int)  # bucket upper bound -> count
+RPC_LATENCY_SUM = 0.0
+RPC_LATENCY_COUNT = 0
+
 
 # Recent client tracking (for UI)
 RECENT_MAX = int(os.getenv("RECENT_CLIENTS_MAX", "100"))
@@ -90,6 +96,17 @@ def metrics_text(ws_clients_count: int) -> str:
     lines.append("# HELP virtual_shelly_udp_replies_total Total UDP replies sent")
     lines.append("# TYPE virtual_shelly_udp_replies_total counter")
     lines.append(f"virtual_shelly_udp_replies_total {UDP_REPLIES_TOTAL}")
+    # HTTP /rpc latency histogram (simple text format)
+    lines.append("# HELP virtual_shelly_http_rpc_latency_seconds Request latency for HTTP /rpc")
+    lines.append("# TYPE virtual_shelly_http_rpc_latency_seconds histogram")
+    cumulative = 0
+    for b in sorted(RPC_LATENCY_BUCKETS):
+        cumulative += RPC_LATENCY_HIST[b]
+        lines.append(f'virtual_shelly_http_rpc_latency_seconds_bucket{{le="{b}"}} {cumulative}')
+    # +Inf bucket
+    lines.append(f'virtual_shelly_http_rpc_latency_seconds_bucket{{le="+Inf"}} {RPC_LATENCY_COUNT}')
+    lines.append(f"virtual_shelly_http_rpc_latency_seconds_sum {RPC_LATENCY_SUM}")
+    lines.append(f"virtual_shelly_http_rpc_latency_seconds_count {RPC_LATENCY_COUNT}")
     return "\n".join(lines)
 
 
@@ -144,4 +161,3 @@ def build_admin_overview(vm, ws_connected_ips: List[str], now_ts_fn) -> Dict[str
         "ts": int(now_ts_fn()),
     }
     return data
-

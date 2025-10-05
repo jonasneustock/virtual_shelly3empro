@@ -16,6 +16,7 @@ def app_module():
     os.environ.setdefault("MDNS_ENABLE", "false")
     os.environ.setdefault("MODBUS_ENABLE", "false")
     os.environ.setdefault("STATE_PATH", "/tmp/virtual_shelly_state_test.json")
+    os.environ["BASIC_AUTH_ENABLE"] = "false"
     # Ensure clean import each session
     if "virtual_shelly.metrics" in importlib.sys.modules:
         importlib.reload(importlib.import_module("virtual_shelly.metrics"))
