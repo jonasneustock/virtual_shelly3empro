@@ -21,6 +21,10 @@ Persistence & Timing
 
 Configuration & Runtime
 
+- [x] Add ENV override for power splitting by clients: `REQUEST_SIDE_SCALING_CLIENTS` (0=auto)
+- [x] Add toggle to enable/disable request-side scaling: `REQUEST_SIDE_SCALING_ENABLE`
+- [ ] Expand README with examples and guidance for scaling overrides
+
 Observability & Logging
 
 - [x] Structured logs with levels; concise request summaries for /rpc, ws:/rpc, UDP.

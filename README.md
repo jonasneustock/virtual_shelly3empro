@@ -68,6 +68,9 @@ Configuration (env vars)
   - `WS_NOTIFY_EPS`: coalescing threshold in watts; only broadcast when change ≥ EPS (default `0.1`).
   - `CORS_ENABLE`: enable CORS middleware (`true|false`, default `false`).
   - `CORS_ORIGINS`: comma‑separated allowed origins (default `*`).
+  - Request‑side scaling (divide power by active client IPs)
+    - `REQUEST_SIDE_SCALING_ENABLE`: `true|false` (default `true`)
+    - `REQUEST_SIDE_SCALING_CLIENTS`: integer override for client count (default `0` = auto by active IPs)
 - UDP RPC
   - `UDP_PORTS`: comma‑separated list (e.g. `1010,2220`) for old/new Shelly Pro 3EM styles
   - `UDP_MAX`: max UDP payload size (bytes)

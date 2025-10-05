@@ -110,6 +110,13 @@ WS_NOTIFY_EPS = float(os.getenv("WS_NOTIFY_EPS", "0.1"))
 CORS_ENABLE = os.getenv("CORS_ENABLE", "false").lower() in ("1", "true", "yes")
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*")
 
+# Request-side scaling (divide power by number of active client IPs)
+REQUEST_SIDE_SCALING_ENABLE = os.getenv("REQUEST_SIDE_SCALING_ENABLE", "true").lower() in ("1", "true", "yes")
+try:
+    REQUEST_SIDE_SCALING_CLIENTS = int(os.getenv("REQUEST_SIDE_SCALING_CLIENTS", "0"))  # 0 = auto count
+except Exception:
+    REQUEST_SIDE_SCALING_CLIENTS = 0
+
 # -----------------------------
 # Helpers
 # -----------------------------
@@ -170,10 +177,15 @@ def _active_request_ip_count() -> int:
 
 
 def _apply_request_side_power_scaling(powers: Tuple[float, float, float]) -> Tuple[float, float, float]:
+    if not REQUEST_SIDE_SCALING_ENABLE:
+        return powers
     total = sum(powers)
     if total == 0:
         return powers
-    count = max(1, _active_request_ip_count())
+    # Allow explicit override of active client count via env; 0 means auto
+    override = int(REQUEST_SIDE_SCALING_CLIENTS or 0)
+    count = override if override > 0 else _active_request_ip_count()
+    count = max(1, count)
     if count <= 1:
         return powers
     return tuple(p / count for p in powers)
