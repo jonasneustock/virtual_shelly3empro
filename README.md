@@ -33,7 +33,7 @@ Quick Start (Docker Compose)
 
 1) Adjust `docker-compose.yaml` environment to match your HA URL, token, and entity IDs.
 2) Ensure your host can use host networking (recommended for UDP + mDNS).
-3) Bring it up:
+3) Bring it up (host networking recommended for UDP + mDNS):
    - `docker compose up -d`
 4) Verify:
    - `curl http://<device-ip>/shelly`
@@ -47,6 +47,11 @@ Manual Run (no Docker)
 - `uvicorn app:app --host 0.0.0.0 --port 80`
 
 Configuration (env vars)
+
+Centralized config and validation
+
+- Configuration is read from environment variables (and optionally a `.env` file if present and `python-dotenv` is installed). On startup, the service validates key settings (URLs and port ranges) and will fail fast with a clear error if something is misconfigured.
+- Env vars below are grouped by concern to make setup easier.
 
 - Home Assistant
   - `HA_BASE_URL`: e.g. `http://homeassistant:8123` or `http://192.168.x.x:8123`
@@ -113,6 +118,48 @@ APIs
   - Response (example): `{"id":1,"src":"<DEVICE_ID>","dst":"unknown","result":{"a_act_power":X.X,"b_act_power":Y.Y,"c_act_power":Z.Z,"total_act_power":T.TTT}}`
   - Also supports `EM1.GetStatus` -> `{ "result": { "act_power": T.TTT } }`
   - If payload includes `"jsonrpc":"2.0"`, responds with JSON‑RPC envelope (fallback handler).
+
+Implemented RPC Methods (summary)
+
+- Shelly.*
+  - `Shelly.GetStatus`: Aggregated device status. This implementation returns `{ ts, sys, em:0, emdata:0 }` analogous to Shelly Gen2 payloads.
+  - `Shelly.GetDeviceInfo`: Device identity `{ id, app, ver, fw_id, model, gen, mac, ... }`.
+  - `Shelly.GetConfig` / `Shelly.SetConfig`: Gets/sets a minimal config object used by the emulator.
+  - `Shelly.Ping`: `{ pong: true, ts }`.
+  - `Shelly.Reboot`: `{ ok: true, ts }`.
+  - `Shelly.ListMethods`: Returns the list of supported method names.
+- EM.*
+  - `EM.GetStatus` (id=0): Phase measurements and totals. Keys include:
+    - `a_voltage`, `b_voltage`, `c_voltage` (V)
+    - `a_current`, `b_current`, `c_current` (A)
+    - `a_act_power`, `b_act_power`, `c_act_power` (W)
+    - `a_pf`, `b_pf`, `c_pf`, `frequency`, `total_act_power`, `ts`
+    - In `STRICT_MINIMAL_PAYLOAD=true` mode, only `{ a_act_power, b_act_power, c_act_power, total_act_power }` are returned.
+- EMData.*
+  - `EMData.GetStatus` (id=0): Energy counters (kWh):
+    - `a_total_act_energy`, `b_total_act_energy`, `c_total_act_energy`
+    - `a_total_act_ret_energy`, `b_total_act_ret_energy`, `c_total_act_ret_energy`
+    - `total_act`, `total_act_ret`, `period`, `ts`
+  - `EMData.ResetCounters`: Resets all energy counters. Returns `{ ok: true, ts }`.
+- MQTT.* (stubs for compatibility)
+  - `MQTT.GetConfig`, `MQTT.SetConfig`, `MQTT.Status`: Return minimal stubbed values.
+- Sys.*
+  - `Sys.GetInfo`: `{ name/id/model/mac/fw_id/ver/app/uptime }`.
+  - `Sys.GetStatus`: `{ ram_total/free, fs_size/free, time, device }`.
+  - `Sys.SetConfig`: For this emulator, proxied to `Shelly.SetConfig`.
+
+UDP RPC Response Shapes
+
+- `EM.GetStatus` (UDP):
+  - Response: `{ id, src, dst: "unknown", result: { a_act_power, b_act_power, c_act_power, total_act_power } }`
+  - Values match Shelly’s decimal/rounding quirks for compatibility with b2500‑meter (always include a decimal).
+- `EM1.GetStatus` (UDP):
+  - Response: `{ id, src, dst: "unknown", result: { act_power } }`
+
+References
+
+- Shelly Gen2 Device RPC (official docs): https://shelly-api-docs.shelly.cloud/gen2/
+- b2500‑meter UDP compatibility reference: https://github.com/tomquist/b2500-meter
 
 Example Commands
 

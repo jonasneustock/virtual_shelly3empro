@@ -4,6 +4,7 @@ import asyncio
 import json
 from typing import Any, Callable, Dict, List, Tuple
 
+_TRANSPORTS: List[Any] = []
 
 class RPCUDPProtocol(asyncio.DatagramProtocol):
     def __init__(
@@ -70,6 +71,7 @@ async def start_udp_servers(
     on_reply: Callable[[int], None],
 ):
     loop = asyncio.get_running_loop()
+    global _TRANSPORTS
     transports = []
     for p in ports:
         transport, _ = await loop.create_datagram_endpoint(
@@ -79,6 +81,7 @@ async def start_udp_servers(
             reuse_port=True,
         )
         transports.append(transport)
+        _TRANSPORTS.append(transport)
     try:
         while True:
             await asyncio.sleep(3600)
@@ -101,3 +104,16 @@ def start_udp_thread(
         asyncio.run(start_udp_servers(ports, max_size, methods, rpc_response_bytes, udp_build_response, on_packet, on_reply))
     threading.Thread(target=_run, daemon=True).start()
 
+
+def stop_udp():
+    """Best-effort close of UDP transports."""
+    global _TRANSPORTS
+    try:
+        for t in list(_TRANSPORTS):
+            try:
+                t.close()
+            except Exception:
+                pass
+        _TRANSPORTS = []
+    except Exception:
+        pass

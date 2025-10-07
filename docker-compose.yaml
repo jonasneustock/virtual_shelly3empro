@@ -30,6 +30,15 @@ services:
       # Minimal payload mode for EM.GetStatus
       STRICT_MINIMAL_PAYLOAD: "false"
 
+      # Runtime controls
+      # DISABLE_BACKGROUND: "0"        # set to "1" for test harnesses (no background threads)
+      # REQUEST_SIDE_SCALING_ENABLE: "true"
+      # REQUEST_SIDE_SCALING_CLIENTS: "0"  # override client count for scaling (0 = auto)
+      # HA_SMOOTHING_ENABLE: "false"
+      # HA_SMOOTHING_WINDOW: "5"
+      # CORS_ENABLE: "false"
+      # CORS_ORIGINS: "*"
+
       GENERATION: "3"
 
       # mDNS
@@ -51,16 +60,33 @@ services:
       B_PF: "sensor.phase_b_pf"
       C_PF: "sensor.phase_c_pf"
 
+    # Hardened runtime (optional)
+    read_only: false   # set to true if you only write to /data
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    # cap_drop:
+    #   - ALL
+    # user: "10001:10001"  # the image already runs as non-root
+
     volumes:
       - shelly3em_state:/data
 
-# If you can’t use host networking, explicitly map ports; discovery via broadcast/mDNS may be limited:
-#    ports:
-#      - "8080:8080/tcp"
-#      - "6010-6022:6010-6022/tcp"
-#      - "1010:1010/udp"
-#      - "2220:2220/udp"
-#      - "5353:5353/udp"
+  # Example bridged networking (limited discovery)
+  # shelly3em-virtual-bridged:
+  #   image: jneustock/shelly3emprovirtual
+  #   restart: unless-stopped
+  #   ports:
+  #     - "8080:80/tcp"          # HTTP server
+  #     - "6010-6022:6010-6022/tcp" # WS fan-out
+  #     - "1010:1010/udp"        # UDP RPC
+  #     - "2220:2220/udp"        # UDP RPC
+  #     - "5353:5353/udp"        # mDNS
+  #   environment:
+  #     HTTP_PORT: "80"
+  #   volumes:
+  #     - shelly3em_state:/data
 
 volumes:
   shelly3em_state: {}

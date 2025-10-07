@@ -149,6 +149,7 @@ def build_admin_overview(vm, ws_connected_ips: List[str], now_ts_fn) -> Dict[str
                 "replies": int(UDP_REPLIES_TOTAL),
             },
         },
+        "upstream": {"ha_connected": bool(getattr(vm, 'ha_connected', True)), "ha_failures": int(getattr(vm, 'ha_failures', 0))},
         "clients": {
             "http_recent": http_recent,
             "ws_recent": ws_recent,

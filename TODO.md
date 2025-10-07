@@ -15,9 +15,9 @@ UI / Dashboard
 - [x] Add live power graphs (total + A/B/C) with 10‑minute rolling window
 - [x] Add graphs for voltages and currents per phase
 - [x] Add time window selector (10m/1h/6h) with simple in‑memory buffers
-- [ ] Switch UI polling to WebSocket subscribe (reduce latency/overhead)
-- [ ] Dark mode + responsive layout improvements (mobile friendly)
-- [ ] Export CSV of recent samples from the UI
+ - [x] Switch UI polling to WebSocket subscribe (reduce latency/overhead)
+ - [x] Dark mode + responsive layout improvements (mobile friendly)
+ - [x] Export CSV of recent samples from the UI
 
 UDP RPC (b2500 compatibility)
 
@@ -25,9 +25,9 @@ UDP RPC (b2500 compatibility)
   - [x] Typical payloads (EM.GetStatus, EM1.GetStatus) covered
   - [ ] Malformed/oversize payloads and silent ignore behavior
 
-mDNS and Discovery
+ mDNS and Discovery
 
-- [ ] Validate TXT set against Shelly conventions (id, app, model, ver, fw_id, mac, gen).
+ - [x] Validate TXT set against Shelly conventions (id, app, model, ver, fw_id, mac, gen).
 
 Persistence & Timing
 
@@ -40,17 +40,17 @@ Persistence & Timing
 Configuration & Runtime
 
 - Config management
-  - [ ] Extract config/env parsing into `config.py` (single source of truth)
-  - [ ] Validate config on boot (URLs, entity IDs, ports); fail‑fast with clear logs
-  - [ ] Optional pydantic settings model with `.env` file support (lazy import to avoid runtime bloat)
-  - [ ] Document and group env vars by concern (HA, HTTP/WS, UDP, Modbus, mDNS, UI)
+  - [x] Extract config/env parsing into `config.py` (single source of truth)
+  - [x] Validate config on boot (URLs, entity IDs, ports); fail‑fast with clear logs
+  - [x] Optional `.env` file support (lazy via python‑dotenv if installed)
+  - [x] Document and group env vars by concern (HA, HTTP/WS, UDP, Modbus, mDNS, UI) in README
 
 - Runtime controls
-  - [ ] Hot‑reload of config via `/admin/reload` or SIGHUP for non‑critical toggles (CORS, smoothing, STRICT_MINIMAL_PAYLOAD)
+  - [x] Hot‑reload of config via `/admin/reload` or SIGHUP for non‑critical toggles (CORS, smoothing, STRICT_MINIMAL_PAYLOAD)
   - [x] Toggle request‑side power scaling via `REQUEST_SIDE_SCALING_ENABLE` (default on), with `REQUEST_IP_TTL` honored
   - [x] Make `HA_SMOOTHING_WINDOW` configurable; allow per‑sensor smoothing overrides
-  - [ ] Honor `DISABLE_BACKGROUND` in docs and example Compose for testing
-  - [ ] Graceful shutdown improvements: persist state, close WS/UDP sockets, unregister mDNS, flush Modbus image
+  - [x] Honor `DISABLE_BACKGROUND` in docs and example Compose for testing
+  - [x] Graceful shutdown improvements: persist state, close WS/UDP sockets, unregister mDNS, flush Modbus image
 
 - Network & bindings
   - [ ] Separate bind addresses for HTTP, WS fan‑out, UDP, Modbus (env)
@@ -67,9 +67,9 @@ Configuration & Runtime
   - [ ] Backpressure and debounce options for WS Notify broadcasts
 
 - Resilience
-  - [ ] HA polling: exponential backoff/jitter, mark sensors unavailable on sustained failures
-  - [ ] Surface upstream status in `/shelly` and `/admin/overview` (e.g., `ha_connected: true/false`)
-  - [ ] Retries + timeouts for HA requests (move to `httpx` async client with connection pool)
+  - [x] HA polling: exponential backoff/jitter; expose `ha_connected` and failure count
+  - [x] Surface upstream status in `/shelly` and `/admin/overview` (e.g., `ha_connected: true/false`)
+  - [x] Retries + timeouts for HA requests via pooled `httpx` client
 
 - CORS & headers
   - [ ] Expand CORS config (regex/explicit origin list); document preflight behavior
@@ -105,32 +105,36 @@ Testing
 
 Documentation
 
-- [ ] Link to official Shelly Gen2 HTTP/WS RPC docs and payload references.
-- [ ] Document which methods are implemented and their response shapes.
+- [x] Link to official Shelly Gen2 HTTP/WS RPC docs and payload references.
+- [x] Document which methods are implemented and their response shapes.
 - [x] Provide example client snippets (HTTP, WS, UDP) in an examples/ folder.
 
 Docker & CI
 
 - Docker image & Compose
-  - [ ] Multi‑arch images (linux/amd64, linux/arm64) using buildx
-  - [ ] Slimmer multi‑stage Dockerfile (non‑root user, read‑only FS, drop caps)
-  - [ ] Add HEALTHCHECK and OCI labels (org.opencontainers.image.*)
-  - [ ] Optional timezone/env/log formatting flags surfaced via env
-  - [ ] Example Compose files: host networking vs. bridged with UDP ports
-  - [ ] Document volume for `/data` and minimal permissions
-  - [ ] Hadolint check for Dockerfile
+  - [x] Multi‑arch images (linux/amd64, linux/arm64) using buildx
+  - [x] Slimmer multi‑stage Dockerfile (non‑root user; read‑only FS recommended in Compose; optional cap_drop)
+  - [x] Add HEALTHCHECK and OCI labels (org.opencontainers.image.*)
+  - [x] Optional timezone/env/log formatting flags surfaced via env (e.g., `TZ`, `LOG_LEVEL`)
+  - [x] Example Compose: host networking and bridged mapping (with UDP/mDNS notes)
+  - [x] Document volume for `/data` and minimal permissions
+  - [x] Hadolint check for Dockerfile (GitHub Action)
 - Build, Publish, Security
   - [ ] GH Actions: build matrix, cache, push to GHCR (and optional Docker Hub)
+    - [x] Push to GHCR via build-and-push workflow
+    - [ ] Add build matrix (Py versions, platforms) and caching
+    - [ ] Optional push to Docker Hub
   - [ ] Tagging: semver (`vX.Y.Z`), `latest`, and git SHA tags
   - [ ] SBOM generation (syft) and image signing (cosign)
   - [ ] Vulnerability scan (Trivy/Grype) gate on critical/high
 - CLI tooling
-  - [ ] Python CLI (`vshelly`) to interact with the service:
-    - [ ] `status` (HTTP/WS), `reset`, `metrics`, `discover`, `udp-test`, `ws-tail`
-  - [ ] Package to PyPI with console‑script entrypoint; support `pipx install`
-  - [ ] Shell completions (bash/zsh/fish) and `--help` docs
-  - [ ] Example snippets for common flows (reset, watch total power)
-  - [ ] CLI integration tests against ephemeral TestClient/uvicorn
+  - [x] Python CLI (`vshelly`) to interact with the service:
+    - [x] `status` (HTTP), `reset`, `metrics`
+    - [x] `discover` (mDNS), `udp-test`, `ws-tail`
+  - [x] Module entrypoint (`python -m vshelly`) ready; console‑script can be added when packaging
+  - [x] `--help` docs via argparse; completions to be added upon packaging
+  - [x] Example flows covered by commands; README additions optional
+  - [x] CLI integration tests using httpx ASGI transport (status/reset/metrics)
 - CI pipeline
   - [ ] Lint (ruff/flake8), format (black), import sort (isort)
   - [ ] Type‑check (mypy) and unit/integration test matrix (Py 3.11/3.12)

@@ -12,6 +12,8 @@ from typing import Dict, Any, Optional, List, Tuple, Deque
 from collections import defaultdict, deque
 
 import requests
+import httpx
+import random
 from fastapi import FastAPI, Request, WebSocket, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse, PlainTextResponse, HTMLResponse
@@ -21,6 +23,7 @@ from virtual_shelly import ui as UI
 from virtual_shelly import rpc_core as RPC
 from virtual_shelly import udp_server as UDP
 from virtual_shelly import timeseries as TS
+from virtual_shelly.config import load_settings, validate_settings
 
 # mDNS
 from zeroconf import Zeroconf, ServiceInfo, InterfaceChoice
@@ -117,6 +120,49 @@ WS_NOTIFY_EPS = float(os.getenv("WS_NOTIFY_EPS", "0.1"))
 CORS_ENABLE = os.getenv("CORS_ENABLE", "false").lower() in ("1", "true", "yes")
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*")
 
+# Load centralized config and override module-level defaults
+try:
+    SETTINGS = load_settings()
+    _cfg_errors = validate_settings(SETTINGS)
+    if _cfg_errors:
+        raise RuntimeError("Invalid configuration:\n - " + "\n - ".join(_cfg_errors))
+    # Apply overrides
+    HA_BASE_URL = SETTINGS.HA_BASE_URL
+    HA_TOKEN = SETTINGS.HA_TOKEN
+    POLL_INTERVAL = SETTINGS.POLL_INTERVAL
+    HA_SMOOTHING_ENABLE = SETTINGS.HA_SMOOTHING_ENABLE
+    HA_SMOOTHING_WINDOW = SETTINGS.HA_SMOOTHING_WINDOW
+    A_POWER, B_POWER, C_POWER = SETTINGS.A_POWER, SETTINGS.B_POWER, SETTINGS.C_POWER
+    A_VOLT, B_VOLT, C_VOLT = SETTINGS.A_VOLT, SETTINGS.B_VOLT, SETTINGS.C_VOLT
+    A_CURR, B_CURR, C_CURR = SETTINGS.A_CURR, SETTINGS.B_CURR, SETTINGS.C_CURR
+    A_PF, B_PF, C_PF = SETTINGS.A_PF, SETTINGS.B_PF, SETTINGS.C_PF
+    DEVICE_ID, APP_ID, MODEL = SETTINGS.DEVICE_ID, SETTINGS.APP_ID, SETTINGS.MODEL
+    FIRMWARE, FW_ID, MAC, SN = SETTINGS.FIRMWARE, SETTINGS.FW_ID, SETTINGS.MAC, SETTINGS.SN
+    MANUFACTURER, GENERATION = SETTINGS.MANUFACTURER, SETTINGS.GENERATION
+    STATE_PATH = SETTINGS.STATE_PATH
+    HTTP_PORT = SETTINGS.HTTP_PORT
+    WS_PORT_START, WS_PORT_END = SETTINGS.WS_PORT_START, SETTINGS.WS_PORT_END
+    UDP_PORTS, UDP_MAX = SETTINGS.UDP_PORTS, SETTINGS.UDP_MAX
+    MDNS_ENABLE, MDNS_HOSTNAME, MDNS_IP = SETTINGS.MDNS_ENABLE, (SETTINGS.MDNS_HOSTNAME or DEVICE_ID), SETTINGS.MDNS_IP
+    MODBUS_ENABLE, MODBUS_PORT, MODBUS_BIND, MODBUS_UNIT_ID = SETTINGS.MODBUS_ENABLE, SETTINGS.MODBUS_PORT, SETTINGS.MODBUS_BIND, SETTINGS.MODBUS_UNIT_ID
+    STRICT_MINIMAL_PAYLOAD = SETTINGS.STRICT_MINIMAL_PAYLOAD
+    WS_NOTIFY_INTERVAL, WS_NOTIFY_EPS = SETTINGS.WS_NOTIFY_INTERVAL, SETTINGS.WS_NOTIFY_EPS
+    CORS_ENABLE, CORS_ORIGINS = SETTINGS.CORS_ENABLE, SETTINGS.CORS_ORIGINS
+    # Runtime/auth/limits
+    REQUEST_SIDE_SCALING_ENABLE = SETTINGS.REQUEST_SIDE_SCALING_ENABLE
+    globals()["REQUEST_SIDE_SCALING_CLIENTS"] = SETTINGS.REQUEST_SIDE_SCALING_CLIENTS
+    try:
+        REQUEST_IP_TTL = SETTINGS.REQUEST_IP_TTL
+    except Exception:
+        pass
+    DISABLE_BACKGROUND = SETTINGS.DISABLE_BACKGROUND
+    BASIC_AUTH_ENABLE = SETTINGS.BASIC_AUTH_ENABLE
+    BASIC_AUTH_USER = SETTINGS.BASIC_AUTH_USER
+    BASIC_AUTH_PASSWORD = SETTINGS.BASIC_AUTH_PASSWORD
+except Exception as _e:
+    # Fallback to env-derived values already set above
+    pass
+
 # -----------------------------
 # Helpers
 # -----------------------------
@@ -143,29 +189,127 @@ def _require_basic_auth(request: Request):
     if not (ok_user and ok_pass):
         raise HTTPException(status_code=401, detail="Unauthorized", headers={"WWW-Authenticate": "Basic"})
     return True
+
+
+def _reload_from_env():
+    global HA_SMOOTHING_ENABLE, HA_SMOOTHING_WINDOW
+    global STRICT_MINIMAL_PAYLOAD
+    global REQUEST_SIDE_SCALING_ENABLE
+    global REQUEST_SIDE_SCALING_CLIENTS
+    global WS_NOTIFY_INTERVAL, WS_NOTIFY_EPS
+    try:
+        HA_SMOOTHING_ENABLE = os.getenv("HA_SMOOTHING_ENABLE", "false").lower() in ("1","true","yes")
+        HA_SMOOTHING_WINDOW = int(os.getenv("HA_SMOOTHING_WINDOW", str(HA_SMOOTHING_WINDOW)))
+    except Exception:
+        pass
+    try:
+        STRICT_MINIMAL_PAYLOAD = os.getenv("STRICT_MINIMAL_PAYLOAD", "false").lower() in ("1","true","yes")
+    except Exception:
+        pass
+    try:
+        REQUEST_SIDE_SCALING_ENABLE = os.getenv("REQUEST_SIDE_SCALING_ENABLE", "true").lower() in ("1","true","yes")
+        REQUEST_SIDE_SCALING_CLIENTS = int(os.getenv("REQUEST_SIDE_SCALING_CLIENTS", str(0)))
+    except Exception:
+        pass
+    try:
+        WS_NOTIFY_INTERVAL = float(os.getenv("WS_NOTIFY_INTERVAL", str(WS_NOTIFY_INTERVAL)))
+        WS_NOTIFY_EPS = float(os.getenv("WS_NOTIFY_EPS", str(WS_NOTIFY_EPS)))
+    except Exception:
+        pass
+    try:
+        # CORS toggles (best-effort add; cannot remove existing middleware)
+        from fastapi.middleware.cors import CORSMiddleware as _C
+        enable = os.getenv("CORS_ENABLE")
+        if enable is not None:
+            globals()["CORS_ENABLE"] = str(enable).lower() in ("1","true","yes","on")
+        origins = os.getenv("CORS_ORIGINS")
+        if origins is not None:
+            globals()["CORS_ORIGINS"] = origins
+        if globals().get("CORS_ENABLE"):
+            origins_list = [o.strip() for o in globals().get("CORS_ORIGINS","*").split(",") if o.strip()] or ["*"]
+            try:
+                app.add_middleware(_C, allow_origins=origins_list, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+            except Exception:
+                pass
+    except Exception:
+        pass
+    # Smoothing overrides via JSON env var {"entity_id": window}
+    try:
+        import json as _json
+        raw = os.getenv("HA_SMOOTHING_OVERRIDES")
+        if raw:
+            d = _json.loads(raw)
+            if isinstance(d, dict):
+                for k, v in d.items():
+                    _set_smoothing_override(str(k), int(v))
+    except Exception:
+        pass
+_HA_CLIENT: Optional[httpx.Client] = None
+_HA_CLIENT_BASE: Optional[str] = None
+_HA_CLIENT_TOKEN: Optional[str] = None
+_HA_FAILED_DURING_CYCLE = False
+
+def _get_ha_client() -> httpx.Client:
+    global _HA_CLIENT, _HA_CLIENT_BASE, _HA_CLIENT_TOKEN
+    if _HA_CLIENT is None or _HA_CLIENT_BASE != HA_BASE_URL or _HA_CLIENT_TOKEN != HA_TOKEN:
+        try:
+            if _HA_CLIENT is not None:
+                _HA_CLIENT.close()
+        except Exception:
+            pass
+        _HA_CLIENT_BASE = HA_BASE_URL
+        _HA_CLIENT_TOKEN = HA_TOKEN
+        _HA_CLIENT = httpx.Client(
+            base_url=_HA_CLIENT_BASE,
+            headers={"Authorization": f"Bearer {_HA_CLIENT_TOKEN}", "Content-Type": "application/json"},
+            timeout=httpx.Timeout(3.0, connect=2.0),
+            limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
+        )
+    return _HA_CLIENT  # type: ignore[return-value]
+
+
 def ha_get(entity_id: str) -> Optional[float]:
     if not entity_id:
         return None
-    url = f"{HA_BASE_URL}/api/states/{entity_id}"
-    headers = {"Authorization": f"Bearer {HA_TOKEN}", "Content-Type": "application/json"}
-    try:
-        r = requests.get(url, headers=headers, timeout=3)
-        if r.status_code != 200:
-            return None
-        data = r.json()
-        raw = data.get("state")
-        if raw in (None, "unknown", "unavailable", ""):
-            return None
-        value = float(raw)
-        if HA_SMOOTHING_ENABLE:
-            value = _smooth_value(entity_id, value)
-        return value
-    except Exception:
-        return None
+    global _HA_FAILED_DURING_CYCLE
+    url = f"/api/states/{entity_id}"
+    client = _get_ha_client()
+    last_exc = None
+    for _ in range(2):  # simple retry
+        try:
+            r = client.get(url)
+            if r.status_code != 200:
+                _HA_FAILED_DURING_CYCLE = True
+                last_exc = f"status {r.status_code}"
+                continue
+            data = r.json()
+            raw = data.get("state")
+            if raw in (None, "unknown", "unavailable", ""):
+                return None
+            value = float(raw)
+            if HA_SMOOTHING_ENABLE:
+                value = _smooth_value(entity_id, value)
+            return value
+        except Exception as e:
+            _HA_FAILED_DURING_CYCLE = True
+            last_exc = e
+            continue
+    return None
 
 
 _SMOOTHING_LOCK = threading.RLock()
 _SMOOTHING_BUFFERS: Dict[str, Deque[float]] = defaultdict(lambda: deque(maxlen=HA_SMOOTHING_WINDOW))
+_SMOOTHING_OVERRIDES: Dict[str, int] = {}
+
+def _set_smoothing_override(entity_id: str, window: int):
+    try:
+        window = int(window)
+        if window <= 0:
+            _SMOOTHING_OVERRIDES.pop(entity_id, None)
+            return
+    except Exception:
+        return
+    _SMOOTHING_OVERRIDES[entity_id] = window
 
 
 try:
@@ -213,7 +357,13 @@ def _apply_request_side_power_scaling(powers: Tuple[float, float, float]) -> Tup
 
 def _smooth_value(entity_id: str, value: float) -> float:
     with _SMOOTHING_LOCK:
+        # Adjust buffer window dynamically if override/global changed
+        desired = _SMOOTHING_OVERRIDES.get(entity_id, HA_SMOOTHING_WINDOW)
         buf = _SMOOTHING_BUFFERS[entity_id]
+        if getattr(buf, 'maxlen', None) != desired:
+            data = list(buf)[-desired:] if desired > 0 else list(buf)
+            buf = deque(data, maxlen=desired)
+            _SMOOTHING_BUFFERS[entity_id] = buf
         buf.append(value)
         if not buf:
             return value
@@ -263,6 +413,8 @@ class VirtualPro3EM:
         self.lock = threading.RLock()
         self.last_poll_mono: Optional[float] = None
         self.last_persist_mono: float = time.monotonic()
+        self.ha_failures: int = 0
+        self.ha_connected: bool = True
         self.phases = {"a": Phase(), "b": Phase(), "c": Phase()}
         self.frequency = 50.0
         self.energy = EnergyCounters()
@@ -282,10 +434,21 @@ class VirtualPro3EM:
         persisted = load_state()
         if persisted.get("energy"):
             self.energy = EnergyCounters(**persisted["energy"])
+        # Seed timeseries history for warm start
+        try:
+            hist = persisted.get("history")
+            if isinstance(hist, list) and hist:
+                TS.set_history(hist)
+        except Exception:
+            pass
 
     def persist(self):
         with self.lock:
-            save_state({"energy": json.loads(self.energy.json())})
+            try:
+                history = TS.get_history()
+            except Exception:
+                history = []
+            save_state({"energy": json.loads(self.energy.json()), "history": history})
 
     def integrate_energy(self, dt_s: float):
         with self.lock:
@@ -310,7 +473,9 @@ class VirtualPro3EM:
                 self.energy.total_export += kwh_total
 
     def poll_home_assistant(self):
+        global _HA_FAILED_DURING_CYCLE
         try:
+            _HA_FAILED_DURING_CYCLE = False
             a_w = ha_get(A_POWER) or 0.0
             b_w = ha_get(B_POWER) or 0.0
             c_w = ha_get(C_POWER) or 0.0
@@ -338,6 +503,16 @@ class VirtualPro3EM:
                 if dt > 0:
                     self.integrate_energy(dt)
             self.last_poll_mono = now_mono
+
+            # Update HA connectivity status
+            try:
+                if _HA_FAILED_DURING_CYCLE:
+                    self.ha_failures = min(self.ha_failures + 1, 10)
+                else:
+                    self.ha_failures = 0
+                self.ha_connected = (self.ha_failures == 0)
+            except Exception:
+                pass
 
             # Persist every 30s using monotonic cadence
             if (now_mono - self.last_persist_mono) >= 30.0:
@@ -1195,6 +1370,82 @@ def admin_overview(_auth: bool = Depends(_require_basic_auth)):
         pass
     return JSONResponse(data)
 
+@app.post("/admin/reload")
+async def admin_reload(request: Request, _auth: bool = Depends(_require_basic_auth)):
+    body = {}
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            body = {}
+    except Exception:
+        body = {}
+    if body.get("from_env"):
+        _reload_from_env()
+    global HA_SMOOTHING_ENABLE, HA_SMOOTHING_WINDOW
+    global STRICT_MINIMAL_PAYLOAD
+    global REQUEST_SIDE_SCALING_ENABLE
+    global WS_NOTIFY_INTERVAL, WS_NOTIFY_EPS
+    if "ha_smoothing_enable" in body:
+        HA_SMOOTHING_ENABLE = bool(body.get("ha_smoothing_enable"))
+    if "ha_smoothing_window" in body:
+        try:
+            HA_SMOOTHING_WINDOW = int(body.get("ha_smoothing_window"))
+        except Exception:
+            pass
+    if isinstance(body.get("smoothing_overrides"), dict):
+        for k, v in body.get("smoothing_overrides").items():
+            try:
+                _set_smoothing_override(str(k), int(v))
+            except Exception:
+                pass
+    if "strict_minimal_payload" in body:
+        STRICT_MINIMAL_PAYLOAD = bool(body.get("strict_minimal_payload"))
+    if "request_side_scaling_enable" in body:
+        REQUEST_SIDE_SCALING_ENABLE = bool(body.get("request_side_scaling_enable"))
+    if "request_side_scaling_clients" in body:
+        try:
+            globals()["REQUEST_SIDE_SCALING_CLIENTS"] = int(body.get("request_side_scaling_clients"))
+        except Exception:
+            pass
+    if "ws_notify_interval" in body:
+        try:
+            WS_NOTIFY_INTERVAL = float(body.get("ws_notify_interval"))
+        except Exception:
+            pass
+    if "ws_notify_eps" in body:
+        try:
+            WS_NOTIFY_EPS = float(body.get("ws_notify_eps"))
+        except Exception:
+            pass
+    if "cors_enable" in body or "cors_origins" in body:
+        try:
+            from fastapi.middleware.cors import CORSMiddleware as _C
+            if "cors_enable" in body:
+                globals()["CORS_ENABLE"] = bool(body.get("cors_enable"))
+            if "cors_origins" in body:
+                globals()["CORS_ORIGINS"] = str(body.get("cors_origins") or "*")
+            if globals().get("CORS_ENABLE"):
+                origins_list = [o.strip() for o in globals().get("CORS_ORIGINS","*").split(",") if o.strip()] or ["*"]
+                try:
+                    app.add_middleware(_C, allow_origins=origins_list, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    effective = {
+        "ha_smoothing_enable": HA_SMOOTHING_ENABLE,
+        "ha_smoothing_window": HA_SMOOTHING_WINDOW,
+        "smoothing_overrides": _SMOOTHING_OVERRIDES,
+        "strict_minimal_payload": STRICT_MINIMAL_PAYLOAD,
+        "request_side_scaling_enable": REQUEST_SIDE_SCALING_ENABLE,
+        "request_side_scaling_clients": globals().get("REQUEST_SIDE_SCALING_CLIENTS", 0),
+        "ws_notify_interval": WS_NOTIFY_INTERVAL,
+        "ws_notify_eps": WS_NOTIFY_EPS,
+        "cors_enable": globals().get("CORS_ENABLE"),
+        "cors_origins": globals().get("CORS_ORIGINS"),
+    }
+    return JSONResponse({"ok": True, "effective": effective})
+
 @app.get("/")
 def root():
     return {"service": "virtual-shelly-pro-3em", "rpc": "/rpc"}
@@ -1416,6 +1667,7 @@ def shelly_http_info():
         "auth_en": auth_enabled,
         "auth_domain": None,
         "uptime": int(time.monotonic()),
+        "ha_connected": bool(getattr(VM, 'ha_connected', True)),
         **link,
     }
 
@@ -1462,7 +1714,17 @@ def poll_loop():
                     _last_notify_mono = now_m
         except Exception:
             pass
-        time.sleep(POLL_INTERVAL)
+        # Dynamic backoff with jitter on HA failures
+        try:
+            fails = getattr(VM, 'ha_failures', 0) or 0
+        except Exception:
+            fails = 0
+        base = POLL_INTERVAL
+        if fails > 0:
+            sleep_s = min(base * (2 ** min(fails, 5)) + random.uniform(0, base), 60.0)
+        else:
+            sleep_s = base
+        time.sleep(max(0.1, sleep_s))
 if not DISABLE_BACKGROUND:
     threading.Thread(target=poll_loop, daemon=True).start()
 
@@ -1523,6 +1785,42 @@ async def _on_shutdown():
             NOTIFIER_TASK.cancel()
         except Exception:
             pass
+    # Attempt to close WS clients
+    try:
+        for ws in list(WS_RPC_CLIENTS):
+            try:
+                await ws.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    # Unregister mDNS
+    try:
+        zc = MDNS_STATE.get("zc")
+        infos = MDNS_STATE.get("infos") or []
+        if zc and infos:
+            for info in infos:
+                try:
+                    zc.unregister_service(info)
+                except Exception:
+                    pass
+            try:
+                zc.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    # Stop UDP transports
+    try:
+        UDP.stop_udp()
+    except Exception:
+        pass
+    # Flush Modbus image one last time
+    try:
+        if MODBUS_BRIDGE:
+            MODBUS_BRIDGE.update()
+    except Exception:
+        pass
 
 
 @app.websocket("/rpc")
@@ -1804,6 +2102,26 @@ def _get_ip_for_mdns() -> str:
         s.close()
     return ip
 
+MDNS_STATE = {"zc": None, "infos": []}
+
+def _build_mdns_txt() -> Dict[bytes, bytes]:
+    required = {
+        "gen": str(GENERATION),
+        "id": DEVICE_ID,
+        "app": APP_ID,
+        "fw_id": FW_ID,
+        "model": MODEL,
+        "ver": FIRMWARE,
+        "mac": MAC,
+    }
+    out: Dict[bytes, bytes] = {}
+    for k, v in required.items():
+        try:
+            out[str(k).encode()] = str(v).encode()
+        except Exception:
+            pass
+    return out
+
 def start_mdns():
     if not MDNS_ENABLE:
         return
@@ -1815,21 +2133,13 @@ def start_mdns():
     except Exception:
         zc = Zeroconf(interfaces=InterfaceChoice.Default)
 
-    txt = {
-        "gen": str(GENERATION),
-        "id": DEVICE_ID,
-        "app": APP_ID,
-        "fw_id": FW_ID,
-        "model": MODEL,
-        "ver": FIRMWARE,
-        "mac": MAC,
-    }
+    txt = _build_mdns_txt()
     info_http = ServiceInfo(
         "_http._tcp.local.",
         f"{instance}._http._tcp.local.",
         addresses=[addr],
         port=HTTP_PORT,
-        properties={k.encode(): v.encode() for k, v in txt.items()},
+        properties=txt,
         server=f"{instance}.local.",
     )
     info_shelly = ServiceInfo(
@@ -1837,7 +2147,7 @@ def start_mdns():
         f"{instance}._shelly._tcp.local.",
         addresses=[addr],
         port=HTTP_PORT,
-        properties={k.encode(): v.encode() for k, v in txt.items()},
+        properties=txt,
         server=f"{instance}.local.",
     )
     info_modbus = None
@@ -1864,6 +2174,14 @@ def start_mdns():
             zc.register_service(info_shelly)
             if info_modbus is not None:
                 zc.register_service(info_modbus)
+        try:
+            MDNS_STATE["zc"] = zc
+            infos = [info_http, info_shelly]
+            if info_modbus is not None:
+                infos.append(info_modbus)
+            MDNS_STATE["infos"] = infos
+        except Exception:
+            pass
         current_ip = ip
         while True:
             time.sleep(60)
@@ -1916,5 +2234,9 @@ def _handle_term(signum, frame):
 try:
     signal.signal(signal.SIGTERM, _handle_term)
     signal.signal(signal.SIGINT, _handle_term)
+    try:
+        signal.signal(signal.SIGHUP, lambda s, f: _reload_from_env())
+    except Exception:
+        pass
 except Exception:
     pass

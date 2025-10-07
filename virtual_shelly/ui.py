@@ -9,27 +9,40 @@ def dashboard_html() -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Virtual Shelly 3EM Pro — Status</title>
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 16px; color: #0b0b0b; }
-    h1 { font-size: 20px; margin: 0 0 12px 0; }
+    :root {
+      --bg: #ffffff; --fg: #0b0b0b; --muted: #666; --card: #fff; --border: #e2e2e2; --grid: #eee; --code: #f6f8fa;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #0f1115; --fg: #e6edf3; --muted: #9da0a6; --card: #0f141a; --border: #23262d; --grid: #23262d; --code: #1f232a; }
+    }
+    [data-theme="dark"] { --bg: #0f1115; --fg: #e6edf3; --muted: #9da0a6; --card: #0f141a; --border: #23262d; --grid: #23262d; --code: #1f232a; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 16px; color: var(--fg); background: var(--bg); }
+    h1 { font-size: 20px; margin: 0 0 12px 0; display:flex; align-items:center; gap: 12px; }
     h2 { font-size: 16px; margin: 18px 0 10px 0; }
     .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-    .card { border: 1px solid #e2e2e2; border-radius: 8px; padding: 12px; }
+    @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+    .card { border: 1px solid var(--border); background: var(--card); border-radius: 8px; padding: 12px; }
     table { border-collapse: collapse; width: 100%; }
-    th, td { border-bottom: 1px solid #eee; padding: 6px 8px; text-align: left; font-size: 14px; }
-    th { background: #fafafa; font-weight: 600; }
-    .muted { color: #666; font-size: 12px; }
-    code { background: #f6f8fa; padding: 1px 4px; border-radius: 4px; }
+    th, td { border-bottom: 1px solid var(--grid); padding: 6px 8px; text-align: left; font-size: 14px; }
+    th { background: rgba(0,0,0,0.02); font-weight: 600; }
+    .muted { color: var(--muted); font-size: 12px; }
+    code { background: var(--code); padding: 1px 4px; border-radius: 4px; }
     .charts { display: grid; grid-template-columns: 1fr; gap: 16px; }
-    .chart-wrap { border: 1px solid #e2e2e2; border-radius: 8px; padding: 12px; }
+    .chart-wrap { border: 1px solid var(--border); background: var(--card); border-radius: 8px; padding: 12px; }
     .legend { margin: 6px 0 0 0; font-size: 12px; }
     .legend span { display: inline-block; margin-right: 12px; }
     .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; }
+    .toolbar { margin-left: auto; display:flex; align-items:center; gap:10px; }
+    button, select { font: inherit; padding: 4px 8px; border: 1px solid var(--border); background: var(--card); color: var(--fg); border-radius: 6px; }
   </style>
   <script>
     // Rolling buffers for graphs (last ~10 minutes at 5s interval = 120 points)
     let MAX_POINTS = 120; // dynamic window
     const hist = { ts: [], total: [], a: [], b: [], c: [],
                    va: [], vb: [], vc: [], ia: [], ib: [], ic: [] };
+
+    let WS = null;
+    let wsConnected = false;
 
     async function fetchOverview() {
       try {
@@ -246,14 +259,89 @@ def dashboard_html() -> str:
 
     function setWindow(points){ MAX_POINTS = points; /* arrays will roll automatically */ }
 
+    function connectWS() {
+      try {
+        const proto = (location.protocol === 'https:') ? 'wss' : 'ws';
+        WS = new WebSocket(`${proto}://${location.host}/rpc`);
+        WS.onopen = () => { wsConnected = true; };
+        WS.onmessage = (ev) => {
+          try {
+            const msg = JSON.parse(ev.data);
+            if (msg && msg.method && (msg.method === 'NotifyStatus' || msg.method === 'NotifyFullStatus')) {
+              const p = msg.params || {};
+              let em = p['em:0'] || p.em || {};
+              if (em) {
+                // Update the current table and time series
+                const wrap = { device: {}, ts: p.ts || Math.floor(Date.now()/1000), values: { em: em, emdata: {} }, metrics: {}, clients: {} };
+                updateHistoryAndDraw(wrap);
+                // Also refresh current values table only
+                document.getElementById('updated').textContent = new Date(wrap.ts * 1000).toLocaleString();
+                const cur = [
+                  ['A Voltage (V)', fmt(em.a_voltage)],
+                  ['B Voltage (V)', fmt(em.b_voltage)],
+                  ['C Voltage (V)', fmt(em.c_voltage)],
+                  ['A Current (A)', fmt(em.a_current)],
+                  ['B Current (A)', fmt(em.b_current)],
+                  ['C Current (A)', fmt(em.c_current)],
+                  ['A Power (W)', fmt(em.a_act_power)],
+                  ['B Power (W)', fmt(em.b_act_power)],
+                  ['C Power (W)', fmt(em.c_act_power)],
+                  ['Power Factor A', fmt(em.a_pf, 3)],
+                  ['Power Factor B', fmt(em.b_pf, 3)],
+                  ['Power Factor C', fmt(em.c_pf, 3)],
+                  ['Frequency (Hz)', fmt(em.frequency, 2)],
+                  ['Total Power (W)', fmt(em.total_act_power)],
+                ];
+                document.getElementById('current-tbody').innerHTML = cur.map(([k,v]) => `<tr><td>${k}</td><td><b>${v}</b></td></tr>`).join('');
+              }
+            }
+          } catch (e) {}
+        };
+        WS.onclose = () => { wsConnected = false; setTimeout(connectWS, 2000); };
+        WS.onerror = () => { try { WS.close(); } catch (e) {} };
+      } catch (e) { setTimeout(connectWS, 2000); }
+    }
+
+    function toggleTheme() {
+      const d = document.documentElement.getAttribute('data-theme');
+      const next = (d === 'dark') ? '' : 'dark';
+      if (next) document.documentElement.setAttribute('data-theme', next); else document.documentElement.removeAttribute('data-theme');
+      try { localStorage.setItem('vs_theme', next || ''); } catch (e) {}
+    }
+
+    function loadTheme() {
+      try { const v = localStorage.getItem('vs_theme'); if (v) document.documentElement.setAttribute('data-theme', v); } catch (e) {}
+    }
+
+    function downloadCSV() {
+      // Build CSV from history buffers
+      const rows = ['ts,a,b,c,total,va,vb,vc,ia,ib,ic'];
+      const n = hist.ts.length;
+      for (let i=0;i<n;i++) {
+        const row = [hist.ts[i], hist.a[i]||'', hist.b[i]||'', hist.c[i]||'', hist.total[i]||'', hist.va[i]||'', hist.vb[i]||'', hist.vc[i]||'', hist.ia[i]||'', hist.ib[i]||'', hist.ic[i]||''];
+        rows.push(row.join(','));
+      }
+      const blob = new Blob([rows.join('\n')], {type: 'text/csv'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href = url; a.download = 'shelly3em-history.csv'; a.click(); URL.revokeObjectURL(url);
+    }
+
     window.addEventListener('load', () => {
+      loadTheme();
+      connectWS();
       fetchOverview();
-      setInterval(fetchOverview, 5000);
+      // Refresh overview every 30s for metrics/clients/energy; WS handles live values
+      setInterval(fetchOverview, 30000);
     });
   </script>
 </head>
 <body>
-  <h1>Virtual Shelly 3EM Pro — Status <span class="muted" id="device"></span></h1>
+  <h1>Virtual Shelly 3EM Pro — Status <span class="muted" id="device"></span>
+    <span class="toolbar">
+      <button onclick="toggleTheme()" title="Toggle dark mode">Theme</button>
+      <button onclick="downloadCSV()" title="Download CSV of history">Export CSV</button>
+    </span>
+  </h1>
   <div class="muted">Updated: <span id="updated">-</span></div>
 
   <div class="grid">

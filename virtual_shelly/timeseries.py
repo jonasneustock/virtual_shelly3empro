@@ -50,3 +50,21 @@ def get_history(limit: int | None = None) -> List[Dict[str, float]]:
             })
         return out
 
+
+def set_history(history: List[Dict[str, float]]) -> None:
+    """Replace the current buffers with the provided history (bounded)."""
+    if not isinstance(history, list):
+        return
+    with _lock:
+        _ts.clear(); _a.clear(); _b.clear(); _c.clear(); _total.clear()
+        # Keep only last MAX_POINTS
+        start = max(0, len(history) - MAX_POINTS)
+        for item in history[start:]:
+            try:
+                _ts.append(int(item.get("ts")))
+                _a.append(float(item.get("a", 0.0)))
+                _b.append(float(item.get("b", 0.0)))
+                _c.append(float(item.get("c", 0.0)))
+                _total.append(float(item.get("total", 0.0)))
+            except Exception:
+                continue
