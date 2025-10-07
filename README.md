@@ -76,7 +76,8 @@ Centralized config and validation
   - `CORS_ORIGINS`: comma‑separated allowed origins (default `*`).
 - UI & Clients
   - `RECENT_CLIENTS_MAX`: max recent client records retained for HTTP/WS/UDP lists (default `100`).
-  - `REQUEST_IP_TTL`: seconds to consider a requester "active" for request‑side power scaling (default `30`).
+  - `REQUEST_IP_TTL`: seconds to consider a requester "active" for request‑side power splitting/scaling (default `30`).
+  - `REQUEST_SIDE_SCALING_ENABLE`: enable/disable request‑side power splitting across active clients (`true|false`, default `true`).
 - UDP RPC
   - `UDP_PORTS`: comma‑separated list (e.g. `1010,2220`) for old/new Shelly Pro 3EM styles
   - `UDP_MAX`: max UDP payload size (bytes)
@@ -93,6 +94,19 @@ Centralized config and validation
   - `STRICT_MINIMAL_PAYLOAD`: when `true`, HTTP/WS `EM.GetStatus` returns only `{a_act_power,b_act_power,c_act_power,total_act_power}` (some gateways prefer this).
 - Persistence
   - `STATE_PATH`: defaults to `/data/state.json` (mounted via volume in Compose).
+
+Power Splitting (Request‑Side)
+
+- What it is: When multiple apps/gateways poll this emulator at the same time, reported power can be double‑counted upstream. With request‑side power splitting enabled, the emulator divides the per‑phase and total power equally across the number of unique client IPs seen within a short window.
+- How it works: For each response, it counts unique requester IPs seen within `REQUEST_IP_TTL` seconds and divides `a_act_power`, `b_act_power`, `c_act_power`, and `total_act_power` by that count.
+- Enable/disable: Set `REQUEST_SIDE_SCALING_ENABLE=true` (default) to enable, or `false` to return raw HA values without splitting.
+- Scope: Applies to HTTP/WS `EM.GetStatus`, UDP `EM.GetStatus`/`EM1.GetStatus`, and Modbus instantaneous power registers. Energy integration/persistence is not scaled; counters are based on the raw HA power values.
+- Tuning: Adjust `REQUEST_IP_TTL` (seconds) to define how long a requester remains "active" for splitting.
+- Runtime toggle example:
+  - `curl -s -X POST http://<ip>/admin/reload -H 'Content-Type: application/json' -d '{"request_side_scaling_enable": false}'`
+- Docker Compose example:
+  - `REQUEST_SIDE_SCALING_ENABLE: "true"`
+  - `REQUEST_IP_TTL: "30"`
 
 Development & Testing
 
