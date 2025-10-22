@@ -10,7 +10,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY app.py /app/app.py
 COPY virtual_shelly /app/virtual_shelly
-COPY vshelly /app/vshelly
+#COPY vshelly /app/vshelly
 ENV PYTHONPATH=/app
 VOLUME ["/data"]
 
