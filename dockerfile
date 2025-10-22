@@ -7,7 +7,11 @@ WORKDIR /app
 COPY requirements.txt /app/
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Copy application code
 COPY app.py /app/app.py
+COPY virtual_shelly /app/virtual_shelly
+COPY vshelly /app/vshelly
+ENV PYTHONPATH=/app
 VOLUME ["/data"]
 
 # HTTP + WS range + UDP RPC + mDNS
