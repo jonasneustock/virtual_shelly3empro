@@ -277,10 +277,26 @@ class VirtualPro3EM:
         persisted = load_state()
         if persisted.get("energy"):
             self.energy = EnergyCounters(**persisted["energy"])
+        if persisted.get("power_dataset"):
+            try:
+                for ts, p in persisted.get("power_dataset", []):
+                    self.power_dataset.append((float(ts), float(p)))
+            except Exception:
+                pass
+        self._prune_power_dataset(time.time())
+        # Seed short history for UI from persisted dataset
+        for ts, p in list(self.power_dataset)[-len(self.power_history):]:
+            self.power_history.append((ts, p))
 
     def persist(self):
+        now = time.time()
         with self.lock:
-            save_state({"energy": json.loads(self.energy.json())})
+            self._prune_power_dataset(now)
+            doc = {
+                "energy": json.loads(self.energy.json()),
+                "power_dataset": list(self.power_dataset),
+            }
+        save_state(doc)
 
     def integrate_energy(self, dt_s: float):
         with self.lock:
