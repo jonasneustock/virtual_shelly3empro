@@ -336,9 +336,10 @@ class VirtualPro3EM:
                 self.last_model_train = now
         if should_train and series:
             try:
+                log.info("Starting scheduled model training (%d samples)", len(series))
                 self.train_power_model(series, trained_at=now)
-            except Exception:
-                pass
+            except Exception as exc:
+                log.error("Scheduled model training failed: %s", exc, exc_info=True)
 
     def _prune_power_dataset(self, now_ts: float) -> None:
         cutoff = now_ts - POWER_RETENTION_SECONDS
@@ -348,7 +349,9 @@ class VirtualPro3EM:
     def train_power_model(self, series: List[Tuple[float, float]], trained_at: Optional[float] = None) -> None:
         # Fit a RandomForestRegressor over recent samples using time offset as the feature
         if not series or len(series) < 2:
+            log.warning("Skipping model training: not enough samples (%d)", len(series) if series else 0)
             return
+        log.info("Training RandomForestRegressor on %d samples", len(series))
         ref_ts = series[-1][0]
         offsets = [ts - ref_ts for ts, _ in series]
         ys = [p for _, p in series]
@@ -377,6 +380,7 @@ class VirtualPro3EM:
             }
             self.model_metrics = {"mse": mse, "mape": mape, "n": len(series)}
             self.last_model_train = ts_trained
+        log.info("Model trained: mse=%.4f mape=%.2f%% n=%d", mse, mape, len(series))
 
     def trigger_full_training(self) -> Dict[str, Any]:
         # Train using the full retained dataset (best-effort) and return metrics
@@ -384,8 +388,10 @@ class VirtualPro3EM:
             series = list(self.power_dataset)
             dataset_total = len(series)
         if len(series) < 2:
+            log.warning("Manual training aborted: not enough data (%d)", dataset_total)
             return {"ok": False, "error": "not enough data", "dataset_total": dataset_total}
         ts = time.time()
+        log.info("Manual training triggered over full dataset (%d samples)", dataset_total)
         self.train_power_model(series, trained_at=ts)
         with self.lock:
             metrics = dict(self.model_metrics)
@@ -417,10 +423,10 @@ class VirtualPro3EM:
             ref_ts = self.model_ref_ts if self.model_ref_ts is not None else last_ts
         steps = max(1, int(horizon_seconds / step_seconds))
 
-        # If model is not ready, fall back to a flat forecast
+        # If model is not ready, skip forecast
         if model is None:
-            base = hist[-1][1]
-            return [(last_ts + i * step_seconds, base) for i in range(1, steps + 1)]
+            log.warning("Forecast skipped: model not trained yet")
+            return []
 
         forecast: List[Tuple[float, float]] = []
         for i in range(1, steps + 1):
@@ -428,9 +434,10 @@ class VirtualPro3EM:
             delta = target_ts - ref_ts
             try:
                 pred = float(model.predict([[delta]])[0])
-            except Exception:
-                pred = hist[-1][1]
-            forecast.append((target_ts, pred))
+                forecast.append((target_ts, pred))
+            except Exception as exc:
+                log.error("Forecasting failed at step %d: %s", i, exc, exc_info=True)
+                return []
         return forecast
 
     def build_power_snapshot(self) -> Dict[str, Any]:
