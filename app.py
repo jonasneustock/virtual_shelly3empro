@@ -224,7 +224,8 @@ def save_state(doc: Dict[str, Any]) -> None:
 # -----------------------------
 POWER_RETENTION_DAYS = 30
 POWER_RETENTION_SECONDS = POWER_RETENTION_DAYS * 24 * 3600
-POWER_FORECAST_WINDOW = 30  # number of most recent samples used to fit/forecast
+POWER_FEATURE_WINDOW = 30  # number of most recent samples used as features
+FORECAST_HORIZON_STEPS = 3  # number of steps to predict ahead
 MODEL_TRAIN_INTERVAL = 3600.0  # seconds between retraining runs
 POWER_HISTORY_SECONDS = 180  # short window for UI chart
 
@@ -329,9 +330,9 @@ class VirtualPro3EM:
             self.power_history.append((now, float(total_power)))
             self.power_dataset.append((now, float(total_power)))
             self._prune_power_dataset(now)
-            if (self.last_model_train is None or (now - self.last_model_train) >= MODEL_TRAIN_INTERVAL) and len(self.power_dataset) >= POWER_FORECAST_WINDOW:
-                # Copy a small tail for training outside the lock
-                series = list(self.power_dataset)[-POWER_FORECAST_WINDOW:]
+            if (self.last_model_train is None or (now - self.last_model_train) >= MODEL_TRAIN_INTERVAL) and len(self.power_dataset) >= (POWER_FEATURE_WINDOW + FORECAST_HORIZON_STEPS):
+                # Copy the dataset for training outside the lock
+                series = list(self.power_dataset)
                 should_train = True
         if should_train and series:
             try:
@@ -345,41 +346,58 @@ class VirtualPro3EM:
         while self.power_dataset and self.power_dataset[0][0] < cutoff:
             self.power_dataset.popleft()
 
+    def _build_training_matrices(self, series: List[Tuple[float, float]]) -> Tuple[List[List[float]], List[List[float]]]:
+        powers = [p for _, p in series]
+        X: List[List[float]] = []
+        Y: List[List[float]] = []
+        for idx in range(len(powers) - POWER_FEATURE_WINDOW - FORECAST_HORIZON_STEPS + 1):
+            window = powers[idx: idx + POWER_FEATURE_WINDOW]
+            target = powers[idx + POWER_FEATURE_WINDOW: idx + POWER_FEATURE_WINDOW + FORECAST_HORIZON_STEPS]
+            if len(window) == POWER_FEATURE_WINDOW and len(target) == FORECAST_HORIZON_STEPS:
+                X.append(window)
+                Y.append(target)
+        return X, Y
+
     def train_power_model(self, series: List[Tuple[float, float]], trained_at: Optional[float] = None) -> None:
-        # Fit a RandomForestRegressor over recent samples using time offset as the feature
-        if not series or len(series) < 2:
-            log.warning("Skipping model training: not enough samples (%d)", len(series) if series else 0)
+        # Fit a RandomForestRegressor over recent samples using the last WINDOW values as features
+        X, Y = self._build_training_matrices(series)
+        if not X or not Y:
+            log.warning("Skipping model training: insufficient sequences (have %d)", len(series))
             return
-        log.info("Training RandomForestRegressor on %d samples", len(series))
-        ref_ts = series[-1][0]
-        offsets = [ts - ref_ts for ts, _ in series]
-        ys = [p for _, p in series]
-        X = [[x] for x in offsets]
+        log.info("Training RandomForestRegressor on %d sequences (window=%d, horizon=%d)", len(X), POWER_FEATURE_WINDOW, FORECAST_HORIZON_STEPS)
 
         model = RandomForestRegressor(
-            n_estimators=64,
-            max_depth=6,
+            n_estimators=128,
+            max_depth=10,
             random_state=42,
         )
-        model.fit(X, ys)
+        model.fit(X, Y)
         preds = model.predict(X)
-        mse = sum((p - y) ** 2 for p, y in zip(preds, ys)) / len(ys)
+        flat_diff = []
+        flat_pct = []
         eps = 1e-3
-        mape = sum(abs((p - y) / (y if abs(y) > eps else eps)) for p, y in zip(preds, ys)) * (100.0 / len(ys))
+        for truth, pred in zip(Y, preds):
+            for t, p in zip(truth, pred):
+                flat_diff.append((p - t) ** 2)
+                denom = t if abs(t) > eps else eps
+                flat_pct.append(abs((p - t) / denom))
+        mse = sum(flat_diff) / len(flat_diff)
+        mape = sum(flat_pct) * (100.0 / len(flat_pct))
 
         ts_trained = trained_at or time.time()
         with self.lock:
             self.model = model
-            self.model_ref_ts = ref_ts
+            self.model_ref_ts = series[-1][0] if series else None
             self.model_params = {
                 "type": "RandomForestRegressor",
                 "trained_at": ts_trained,
                 "n_estimators": model.n_estimators,
-                "window": len(series),
+                "window": POWER_FEATURE_WINDOW,
+                "horizon": FORECAST_HORIZON_STEPS,
             }
-            self.model_metrics = {"mse": mse, "mape": mape, "n": len(series)}
+            self.model_metrics = {"mse": mse, "mape": mape, "n": len(X)}
             self.last_model_train = ts_trained
-        log.info("Model trained: mse=%.4f mape=%.2f%% n=%d", mse, mape, len(series))
+        log.info("Model trained: mse=%.4f mape=%.2f%% n=%d", mse, mape, len(X))
 
     def trigger_full_training(self) -> Dict[str, Any]:
         # Train using the full retained dataset (best-effort) and return metrics
@@ -419,26 +437,30 @@ class VirtualPro3EM:
         last_ts = hist[-1][0]
         with self.lock:
             model = self.model
-            ref_ts = self.model_ref_ts if self.model_ref_ts is not None else last_ts
-        steps = max(1, int(horizon_seconds / step_seconds))
+        steps = FORECAST_HORIZON_STEPS
 
-        preview = [{"ts": round(ts, 3), "w": round(w, 3)} for ts, w in hist[-POWER_FORECAST_WINDOW:]]
+        preview = [{"ts": round(ts, 3), "w": round(w, 3)} for ts, w in hist[-POWER_FEATURE_WINDOW:]]
         log.debug("Forecast request: hist=%d model_ready=%s input_tail=%s", len(hist), bool(model), preview)
         # If model is not ready, skip forecast
         if model is None:
             log.warning("Forecast skipped: model not trained yet")
             return []
 
+        if len(hist) < POWER_FEATURE_WINDOW:
+            log.warning("Forecast skipped: not enough history (%d < %d)", len(hist), POWER_FEATURE_WINDOW)
+            return []
+
+        feature = [w for _, w in hist[-POWER_FEATURE_WINDOW:]]
         forecast: List[Tuple[float, float]] = []
-        for i in range(1, steps + 1):
-            target_ts = last_ts + i * step_seconds
-            delta = target_ts - ref_ts
-            try:
-                pred = float(model.predict([[delta]])[0])
-                forecast.append((target_ts, pred))
-            except Exception as exc:
-                log.error("Forecasting failed at step %d: %s", i, exc, exc_info=True)
-                return []
+        try:
+            preds = model.predict([feature])[0]
+        except Exception as exc:
+            log.error("Forecasting failed: %s", exc, exc_info=True)
+            return []
+
+        for i in range(steps):
+            target_ts = last_ts + (i + 1) * step_seconds
+            forecast.append((target_ts, float(preds[i])))
         output_preview = [{"ts": round(ts, 3), "w": round(w, 3)} for ts, w in forecast]
         log.debug("Forecast built with %d points: %s", len(forecast), output_preview)
         return forecast
