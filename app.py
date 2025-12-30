@@ -333,7 +333,6 @@ class VirtualPro3EM:
                 # Copy a small tail for training outside the lock
                 series = list(self.power_dataset)[-POWER_FORECAST_WINDOW:]
                 should_train = True
-                self.last_model_train = now
         if should_train and series:
             try:
                 log.info("Starting scheduled model training (%d samples)", len(series))
@@ -423,6 +422,7 @@ class VirtualPro3EM:
             ref_ts = self.model_ref_ts if self.model_ref_ts is not None else last_ts
         steps = max(1, int(horizon_seconds / step_seconds))
 
+        log.debug("Forecast request: hist=%d model_ready=%s", len(hist), bool(model))
         # If model is not ready, skip forecast
         if model is None:
             log.warning("Forecast skipped: model not trained yet")
@@ -438,6 +438,7 @@ class VirtualPro3EM:
             except Exception as exc:
                 log.error("Forecasting failed at step %d: %s", i, exc, exc_info=True)
                 return []
+        log.debug("Forecast built with %d points", len(forecast))
         return forecast
 
     def build_power_snapshot(self) -> Dict[str, Any]:
