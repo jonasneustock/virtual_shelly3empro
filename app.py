@@ -12,6 +12,7 @@ from typing import Dict, Any, Optional, List, Tuple, Deque
 from collections import defaultdict, deque
 
 import requests
+from sklearn.ensemble import RandomForestRegressor
 from fastapi import FastAPI, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse, PlainTextResponse, HTMLResponse
@@ -221,6 +222,12 @@ def save_state(doc: Dict[str, Any]) -> None:
 # -----------------------------
 # Virtual meter state
 # -----------------------------
+POWER_RETENTION_DAYS = 30
+POWER_RETENTION_SECONDS = POWER_RETENTION_DAYS * 24 * 3600
+POWER_FORECAST_WINDOW = 30  # number of most recent samples used to fit/forecast
+MODEL_TRAIN_INTERVAL = 3600.0  # seconds between retraining runs
+POWER_HISTORY_SECONDS = 180  # short window for UI chart
+
 class Phase(BaseModel):
     voltage: Optional[float] = None
     current: Optional[float] = None
@@ -246,6 +253,14 @@ class VirtualPro3EM:
         self.phases = {"a": Phase(), "b": Phase(), "c": Phase()}
         self.frequency = 50.0
         self.energy = EnergyCounters()
+        self.power_history: Deque[Tuple[float, float]] = deque(maxlen=600)
+        dataset_maxlen = int(POWER_RETENTION_SECONDS / max(POLL_INTERVAL, 0.5)) + 10
+        self.power_dataset: Deque[Tuple[float, float]] = deque(maxlen=dataset_maxlen)
+        self.last_model_train: Optional[float] = None
+        self.model_params: Dict[str, Any] = {}
+        self.model_metrics: Dict[str, Any] = {"mse": None, "mape": None, "n": 0}
+        self.model: Optional[RandomForestRegressor] = None
+        self.model_ref_ts: Optional[float] = None
         self.config: Dict[str, Any] = {
             "device": {
                 "id": DEVICE_ID,
@@ -289,8 +304,122 @@ class VirtualPro3EM:
             else:
                 self.energy.total_export += kwh_total
 
+    def record_power_sample(self, total_power: float) -> None:
+        # Track recent total power readings for simple forecasting/UI
+        now = time.time()
+        series: Optional[List[Tuple[float, float]]] = None
+        should_train = False
+        with self.lock:
+            self.power_history.append((now, float(total_power)))
+            self.power_dataset.append((now, float(total_power)))
+            self._prune_power_dataset(now)
+            if (self.last_model_train is None or (now - self.last_model_train) >= MODEL_TRAIN_INTERVAL) and len(self.power_dataset) >= POWER_FORECAST_WINDOW:
+                # Copy a small tail for training outside the lock
+                series = list(self.power_dataset)[-POWER_FORECAST_WINDOW:]
+                should_train = True
+                self.last_model_train = now
+        if should_train and series:
+            try:
+                self.train_power_model(series, trained_at=now)
+            except Exception:
+                pass
+
+    def _prune_power_dataset(self, now_ts: float) -> None:
+        cutoff = now_ts - POWER_RETENTION_SECONDS
+        while self.power_dataset and self.power_dataset[0][0] < cutoff:
+            self.power_dataset.popleft()
+
+    def train_power_model(self, series: List[Tuple[float, float]], trained_at: Optional[float] = None) -> None:
+        # Fit a RandomForestRegressor over recent samples using time offset as the feature
+        if not series or len(series) < 2:
+            return
+        ref_ts = series[-1][0]
+        offsets = [ts - ref_ts for ts, _ in series]
+        ys = [p for _, p in series]
+        X = [[x] for x in offsets]
+
+        model = RandomForestRegressor(
+            n_estimators=64,
+            max_depth=6,
+            random_state=42,
+        )
+        model.fit(X, ys)
+        preds = model.predict(X)
+        mse = sum((p - y) ** 2 for p, y in zip(preds, ys)) / len(ys)
+        eps = 1e-3
+        mape = sum(abs((p - y) / (y if abs(y) > eps else eps)) for p, y in zip(preds, ys)) * (100.0 / len(ys))
+
+        ts_trained = trained_at or time.time()
+        with self.lock:
+            self.model = model
+            self.model_ref_ts = ref_ts
+            self.model_params = {
+                "type": "RandomForestRegressor",
+                "trained_at": ts_trained,
+                "n_estimators": model.n_estimators,
+                "window": len(series),
+            }
+            self.model_metrics = {"mse": mse, "mape": mape, "n": len(series)}
+            self.last_model_train = ts_trained
+
+    def get_power_history(self, window_seconds: int = 180) -> List[Tuple[float, float]]:
+        cutoff = time.time() - max(1, window_seconds)
+        with self.lock:
+            data = [(ts, p) for ts, p in self.power_history if ts >= cutoff]
+            if not data:
+                total = (self.phases["a"].act_power or 0.0) + (self.phases["b"].act_power or 0.0) + (self.phases["c"].act_power or 0.0)
+                data = [(time.time(), float(total))]
+        return data
+
+    def forecast_power(self, horizon_seconds: int = 3, step_seconds: float = 1.0, history: Optional[List[Tuple[float, float]]] = None) -> List[Tuple[float, float]]:
+        hist = history if history is not None else self.get_power_history(window_seconds=POWER_HISTORY_SECONDS)
+        if not hist:
+            return []
+        last_ts = hist[-1][0]
+        with self.lock:
+            model = self.model
+            ref_ts = self.model_ref_ts if self.model_ref_ts is not None else last_ts
+        steps = max(1, int(horizon_seconds / step_seconds))
+
+        # If model is not ready, fall back to a flat forecast
+        if model is None:
+            base = hist[-1][1]
+            return [(last_ts + i * step_seconds, base) for i in range(1, steps + 1)]
+
+        forecast: List[Tuple[float, float]] = []
+        for i in range(1, steps + 1):
+            target_ts = last_ts + i * step_seconds
+            delta = target_ts - ref_ts
+            try:
+                pred = float(model.predict([[delta]])[0])
+            except Exception:
+                pred = hist[-1][1]
+            forecast.append((target_ts, pred))
+        return forecast
+
+    def build_power_snapshot(self) -> Dict[str, Any]:
+        history = self.get_power_history(window_seconds=POWER_HISTORY_SECONDS)
+        forecast = self.forecast_power(history=history)
+        current_ts, current_power = history[-1]
+        with self.lock:
+            model = dict(self.model_params)
+            metrics = dict(self.model_metrics)
+        return {
+            "ts": current_ts,
+            "current": round(current_power, 2),
+            "history": [{"ts": ts, "w": round(p, 2)} for ts, p in history],
+            "forecast": [{"ts": ts, "w": round(p, 2)} for ts, p in forecast],
+            "model": {
+                "trained_at": model.get("trained_at"),
+                "mse": metrics.get("mse"),
+                "mape": metrics.get("mape"),
+                "n": metrics.get("n"),
+            },
+        }
+
     def poll_home_assistant(self):
         try:
+            total_power = 0.0
             a_w = ha_get(A_POWER) or 0.0
             b_w = ha_get(B_POWER) or 0.0
             c_w = ha_get(C_POWER) or 0.0
@@ -310,6 +439,10 @@ class VirtualPro3EM:
                 self.phases["a"].pf = ha_get(A_PF) or None
                 self.phases["b"].pf = ha_get(B_PF) or None
                 self.phases["c"].pf = ha_get(C_PF) or None
+
+                total_power = float((self.phases["a"].act_power or 0.0) + (self.phases["b"].act_power or 0.0) + (self.phases["c"].act_power or 0.0))
+
+            self.record_power_sample(total_power)
 
             # Integrate using monotonic time to avoid wall clock jumps
             now_mono = time.monotonic()
@@ -1057,6 +1190,11 @@ def admin_overview():
 @app.get("/")
 def root():
     return {"service": "virtual-shelly-pro-3em", "rpc": "/rpc"}
+
+
+@app.get("/ui/power")
+def ui_power_snapshot():
+    return JSONResponse(VM.build_power_snapshot())
 
 
 @app.get("/ui")

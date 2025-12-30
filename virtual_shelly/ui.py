@@ -14,6 +14,8 @@ def dashboard_html() -> str:
     h2 { font-size: 16px; margin: 18px 0 10px 0; }
     .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
     .card { border: 1px solid #e2e2e2; border-radius: 8px; padding: 12px; }
+    .chart { width: 100%; height: 260px; }
+    .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
     table { border-collapse: collapse; width: 100%; }
     th, td { border-bottom: 1px solid #eee; padding: 6px 8px; text-align: left; font-size: 14px; }
     th { background: #fafafa; font-weight: 600; }
@@ -21,6 +23,8 @@ def dashboard_html() -> str:
     code { background: #f6f8fa; padding: 1px 4px; border-radius: 4px; }
   </style>
   <script>
+    let powerData = { history: [], forecast: [] };
+
     async function fetchOverview() {
       try {
         const res = await fetch('/admin/overview');
@@ -31,10 +35,121 @@ def dashboard_html() -> str:
       }
     }
 
+    async function fetchPower() {
+      try {
+        const res = await fetch('/ui/power');
+        const data = await res.json();
+        powerData = { history: data.history || [], forecast: data.forecast || [] };
+        document.getElementById('current-power').textContent = fmt(data.current);
+        const ts = data.ts || (Date.now() / 1000);
+        document.getElementById('power-updated').textContent = new Date(ts * 1000).toLocaleTimeString();
+        updateModelMetrics(data.model || {});
+        drawPowerChart(powerData.history, powerData.forecast);
+      } catch (e) {
+        console.error('Power fetch error', e);
+      }
+    }
+
     function fmt(n, digits=2) {
       if (n === null || n === undefined) return '-';
       if (typeof n === 'number') return n.toFixed(digits);
       return String(n);
+    }
+
+    function updateModelMetrics(model) {
+      const mse = model.mse;
+      const mape = model.mape;
+      document.getElementById('power-mse').textContent = mse === null || mse === undefined ? '-' : fmt(mse, 3);
+      document.getElementById('power-mape').textContent = mape === null || mape === undefined ? '-' : fmt(mape, 2) + ' %';
+      document.getElementById('power-samples').textContent = model.n || 0;
+      const trainedAt = model.trained_at ? new Date(model.trained_at * 1000).toLocaleTimeString() : '-';
+      document.getElementById('power-trained').textContent = trainedAt;
+    }
+
+    function drawPowerChart(history, forecast) {
+      const canvas = document.getElementById('power-chart');
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      const rect = canvas.getBoundingClientRect();
+      canvas.width = rect.width;
+      canvas.height = rect.height;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      const margin = 36;
+      const plotW = Math.max(10, canvas.width - margin * 2);
+      const plotH = Math.max(10, canvas.height - margin * 2);
+      const nowSec = history.length ? history[history.length - 1].ts : (Date.now() / 1000);
+      const windowSec = 60;
+      const h = (history || []).filter(p => p.ts >= nowSec - windowSec);
+      const f = forecast || [];
+      const combined = h.concat(f);
+      if (!combined.length) {
+        ctx.fillStyle = '#999';
+        ctx.font = '12px sans-serif';
+        ctx.fillText('No power data yet', margin, canvas.height / 2);
+        return;
+      }
+
+      let minTs = Math.min(...combined.map(p => p.ts));
+      let maxTs = Math.max(...combined.map(p => p.ts));
+      if (maxTs - minTs < 1) { maxTs = minTs + 1; }
+      let minW = Math.min(...combined.map(p => p.w));
+      let maxW = Math.max(...combined.map(p => p.w));
+      if (Math.abs(maxW - minW) < 0.1) {
+        maxW = minW + 1;
+        minW = minW - 1;
+      }
+
+      function toXY(pt) {
+        const x = margin + ((pt.ts - minTs) / (maxTs - minTs)) * plotW;
+        const y = canvas.height - margin - ((pt.w - minW) / (maxW - minW)) * plotH;
+        return [x, y];
+      }
+
+      ctx.strokeStyle = '#e5e7eb';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(margin, margin);
+      ctx.lineTo(margin, canvas.height - margin);
+      ctx.lineTo(canvas.width - margin, canvas.height - margin);
+      ctx.stroke();
+
+      function drawSeries(points, color, dashed=false) {
+        if (!points.length) return;
+        ctx.beginPath();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        ctx.setLineDash(dashed ? [6, 4] : []);
+        points.forEach((pt, idx) => {
+          const [x, y] = toXY(pt);
+          if (idx === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
+      drawSeries(h, '#2563eb', false);
+      drawSeries(f, '#d92c20', true);
+
+      if (h.length) {
+        const [x, y] = toXY(h[h.length - 1]);
+        ctx.fillStyle = '#2563eb';
+        ctx.beginPath();
+        ctx.arc(x, y, 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      if (f.length) {
+        const [x, y] = toXY(f[0]);
+        ctx.fillStyle = '#d92c20';
+        ctx.beginPath();
+        ctx.arc(x, y, 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      const rangeLabel = document.getElementById('power-range');
+      if (rangeLabel) {
+        rangeLabel.textContent = `${Math.round(minW)}–${Math.round(maxW)} W window (${Math.round(maxTs - minTs)}s span)`;
+      }
     }
 
     function render(d) {
@@ -111,13 +226,35 @@ def dashboard_html() -> str:
 
     window.addEventListener('load', () => {
       fetchOverview();
+      fetchPower();
       setInterval(fetchOverview, 5000);
+      setInterval(fetchPower, 1000);
+    });
+
+    window.addEventListener('resize', () => {
+      drawPowerChart(powerData.history, powerData.forecast);
     });
   </script>
 </head>
 <body>
   <h1>Virtual Shelly 3EM Pro — Status <span class="muted" id="device"></span></h1>
   <div class="muted">Updated: <span id="updated">-</span></div>
+
+  <div class="card" style="margin-top:12px">
+    <h2>Power (live)</h2>
+    <div class="row" style="margin-bottom:6px">
+      <div>Current total: <b id="current-power">-</b> W</div>
+      <div class="muted">Forecast for next 3s is shown in red.</div>
+    </div>
+    <div class="muted" style="margin-bottom:6px">Power updated: <span id="power-updated">-</span> · <span id="power-range"></span></div>
+    <div class="row muted" style="margin-bottom:6px">
+      <div>MSE: <b id="power-mse">-</b></div>
+      <div>MAPE: <b id="power-mape">-</b></div>
+      <div>Samples: <b id="power-samples">0</b></div>
+      <div>Last train: <span id="power-trained">-</span></div>
+    </div>
+    <canvas id="power-chart" class="chart"></canvas>
+  </div>
 
   <div class="grid">
     <div class="card">
@@ -186,4 +323,3 @@ def dashboard_html() -> str:
 </body>
 </html>
 """
-
