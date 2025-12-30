@@ -12,7 +12,7 @@ from typing import Dict, Any, Optional, List, Tuple, Deque
 from collections import defaultdict, deque
 
 import requests
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.neural_network import MLPRegressor
 from fastapi import FastAPI, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse, PlainTextResponse, HTMLResponse
@@ -225,7 +225,7 @@ def save_state(doc: Dict[str, Any]) -> None:
 POWER_RETENTION_DAYS = 30
 POWER_RETENTION_SECONDS = POWER_RETENTION_DAYS * 24 * 3600
 POWER_FEATURE_WINDOW = 30  # number of most recent samples used as features
-FORECAST_HORIZON_STEPS = 3  # number of steps to predict ahead
+FORECAST_HORIZON_STEPS = 30  # number of steps to predict ahead
 MODEL_TRAIN_INTERVAL = 3600.0  # seconds between retraining runs
 POWER_HISTORY_SECONDS = 180  # short window for UI chart
 
@@ -260,7 +260,7 @@ class VirtualPro3EM:
         self.last_model_train: Optional[float] = None
         self.model_params: Dict[str, Any] = {}
         self.model_metrics: Dict[str, Any] = {"mse": None, "mape": None, "n": 0}
-        self.model: Optional[RandomForestRegressor] = None
+        self.model: Optional[MLPRegressor] = None
         self.model_ref_ts: Optional[float] = None
         self.config: Dict[str, Any] = {
             "device": {
@@ -359,16 +359,18 @@ class VirtualPro3EM:
         return X, Y
 
     def train_power_model(self, series: List[Tuple[float, float]], trained_at: Optional[float] = None) -> None:
-        # Fit a RandomForestRegressor over recent samples using the last WINDOW values as features
+        # Fit an autoencoder-like MLP over recent samples using the last WINDOW values as features
         X, Y = self._build_training_matrices(series)
         if not X or not Y:
             log.warning("Skipping model training: insufficient sequences (have %d)", len(series))
             return
-        log.info("Training RandomForestRegressor on %d sequences (window=%d, horizon=%d)", len(X), POWER_FEATURE_WINDOW, FORECAST_HORIZON_STEPS)
+        log.info("Training autoencoder (MLP) on %d sequences (window=%d, horizon=%d)", len(X), POWER_FEATURE_WINDOW, FORECAST_HORIZON_STEPS)
 
-        model = RandomForestRegressor(
-            n_estimators=128,
-            max_depth=10,
+        model = MLPRegressor(
+            hidden_layer_sizes=(64, 16, 64),
+            activation="relu",
+            solver="adam",
+            max_iter=400,
             random_state=42,
         )
         model.fit(X, Y)
@@ -389,9 +391,8 @@ class VirtualPro3EM:
             self.model = model
             self.model_ref_ts = series[-1][0] if series else None
             self.model_params = {
-                "type": "RandomForestRegressor",
+                "type": "AutoencoderMLP",
                 "trained_at": ts_trained,
-                "n_estimators": model.n_estimators,
                 "window": POWER_FEATURE_WINDOW,
                 "horizon": FORECAST_HORIZON_STEPS,
             }

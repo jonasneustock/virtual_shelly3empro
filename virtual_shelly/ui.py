@@ -44,6 +44,7 @@ def dashboard_html() -> str:
         const ts = data.ts || (Date.now() / 1000);
         document.getElementById('power-updated').textContent = new Date(ts * 1000).toLocaleTimeString();
         updateModelMetrics(data.model || {});
+        renderForecastValues(powerData.forecast);
         drawPowerChart(powerData.history, powerData.forecast);
       } catch (e) {
         console.error('Power fetch error', e);
@@ -71,6 +72,19 @@ def dashboard_html() -> str:
         btn.textContent = `Train on dataset (${total} pts)`;
         btn.disabled = total < 2;
       }
+    }
+
+    function renderForecastValues(forecast) {
+      const el = document.getElementById('forecast-values');
+      if (!el) return;
+      if (!forecast || !forecast.length) {
+        el.textContent = 'No forecast available';
+        return;
+      }
+      const values = forecast.map(p => fmt(p.w, 1));
+      const preview = values.slice(0, 10).join(', ');
+      const suffix = values.length > 10 ? ' …' : '';
+      el.textContent = `Next ${values.length}s: ${preview}${suffix}`;
     }
 
     async function triggerTraining() {
@@ -268,9 +282,10 @@ def dashboard_html() -> str:
     <h2>Power (live)</h2>
     <div class="row" style="margin-bottom:6px">
       <div>Current total: <b id="current-power">-</b> W</div>
-      <div class="muted">Forecast for next 3s is shown in red.</div>
+      <div class="muted">Forecast for next 30s is shown in red.</div>
     </div>
     <div class="muted" style="margin-bottom:6px">Power updated: <span id="power-updated">-</span> · <span id="power-range"></span></div>
+    <div class="muted" style="margin-bottom:6px">Forecast values: <span id="forecast-values">-</span></div>
     <div class="row muted" style="margin-bottom:6px">
       <div>MSE: <b id="power-mse">-</b></div>
       <div>MAPE: <b id="power-mape">-</b></div>
