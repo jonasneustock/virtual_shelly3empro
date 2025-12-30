@@ -362,6 +362,26 @@ class VirtualPro3EM:
             self.model_metrics = {"mse": mse, "mape": mape, "n": len(series)}
             self.last_model_train = ts_trained
 
+    def trigger_full_training(self) -> Dict[str, Any]:
+        # Train using the full retained dataset (best-effort) and return metrics
+        with self.lock:
+            series = list(self.power_dataset)
+            dataset_total = len(series)
+        if len(series) < 2:
+            return {"ok": False, "error": "not enough data", "dataset_total": dataset_total}
+        ts = time.time()
+        self.train_power_model(series, trained_at=ts)
+        with self.lock:
+            metrics = dict(self.model_metrics)
+        return {
+            "ok": True,
+            "trained_at": ts,
+            "dataset_total": dataset_total,
+            "mse": metrics.get("mse"),
+            "mape": metrics.get("mape"),
+            "n": metrics.get("n"),
+        }
+
     def get_power_history(self, window_seconds: int = 180) -> List[Tuple[float, float]]:
         cutoff = time.time() - max(1, window_seconds)
         with self.lock:
@@ -404,6 +424,7 @@ class VirtualPro3EM:
         with self.lock:
             model = dict(self.model_params)
             metrics = dict(self.model_metrics)
+            dataset_total = len(self.power_dataset)
         return {
             "ts": current_ts,
             "current": round(current_power, 2),
@@ -414,6 +435,7 @@ class VirtualPro3EM:
                 "mse": metrics.get("mse"),
                 "mape": metrics.get("mape"),
                 "n": metrics.get("n"),
+                "dataset_total": dataset_total,
             },
         }
 
@@ -1195,6 +1217,16 @@ def root():
 @app.get("/ui/power")
 def ui_power_snapshot():
     return JSONResponse(VM.build_power_snapshot())
+
+
+@app.post("/ui/train")
+def ui_trigger_training():
+    try:
+        result = VM.trigger_full_training()
+        status = 200 if result.get("ok") else 400
+        return JSONResponse(result, status_code=status)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
 
 
 @app.get("/ui")

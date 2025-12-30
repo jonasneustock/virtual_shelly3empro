@@ -64,6 +64,26 @@ def dashboard_html() -> str:
       document.getElementById('power-samples').textContent = model.n || 0;
       const trainedAt = model.trained_at ? new Date(model.trained_at * 1000).toLocaleTimeString() : '-';
       document.getElementById('power-trained').textContent = trainedAt;
+      document.getElementById('power-trained-n').textContent = model.n || 0;
+      const total = model.dataset_total || 0;
+      const btn = document.getElementById('train-btn');
+      if (btn) {
+        btn.textContent = `Train on dataset (${total} pts)`;
+        btn.disabled = total < 2;
+      }
+    }
+
+    async function triggerTraining() {
+      const btn = document.getElementById('train-btn');
+      if (btn) btn.disabled = true;
+      try {
+        await fetch('/ui/train', { method: 'POST' });
+        await fetchPower();
+      } catch (e) {
+        console.error('Train error', e);
+      } finally {
+        if (btn) btn.disabled = false;
+      }
     }
 
     function drawPowerChart(history, forecast) {
@@ -251,7 +271,8 @@ def dashboard_html() -> str:
       <div>MSE: <b id="power-mse">-</b></div>
       <div>MAPE: <b id="power-mape">-</b></div>
       <div>Samples: <b id="power-samples">0</b></div>
-      <div>Last train: <span id="power-trained">-</span></div>
+      <div>Last train: <span id="power-trained">-</span> (n=<span id="power-trained-n">0</span>)</div>
+      <button id="train-btn" type="button" onclick="triggerTraining()">Train on dataset (0 pts)</button>
     </div>
     <canvas id="power-chart" class="chart"></canvas>
   </div>
