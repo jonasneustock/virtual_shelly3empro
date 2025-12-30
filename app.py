@@ -422,7 +422,8 @@ class VirtualPro3EM:
             ref_ts = self.model_ref_ts if self.model_ref_ts is not None else last_ts
         steps = max(1, int(horizon_seconds / step_seconds))
 
-        log.debug("Forecast request: hist=%d model_ready=%s", len(hist), bool(model))
+        preview = [{"ts": round(ts, 3), "w": round(w, 3)} for ts, w in hist[-POWER_FORECAST_WINDOW:]]
+        log.debug("Forecast request: hist=%d model_ready=%s input_tail=%s", len(hist), bool(model), preview)
         # If model is not ready, skip forecast
         if model is None:
             log.warning("Forecast skipped: model not trained yet")
@@ -438,7 +439,8 @@ class VirtualPro3EM:
             except Exception as exc:
                 log.error("Forecasting failed at step %d: %s", i, exc, exc_info=True)
                 return []
-        log.debug("Forecast built with %d points", len(forecast))
+        output_preview = [{"ts": round(ts, 3), "w": round(w, 3)} for ts, w in forecast]
+        log.debug("Forecast built with %d points: %s", len(forecast), output_preview)
         return forecast
 
     def build_power_snapshot(self) -> Dict[str, Any]:

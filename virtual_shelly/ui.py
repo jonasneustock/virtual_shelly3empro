@@ -248,7 +248,7 @@ def dashboard_html() -> str:
       fetchOverview();
       fetchPower();
       setInterval(fetchOverview, 5000);
-      setInterval(fetchPower, 1000);
+      setInterval(fetchPower, 2000);
     });
 
     let resizeTimer = null;
