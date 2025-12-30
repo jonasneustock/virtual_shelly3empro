@@ -251,8 +251,12 @@ def dashboard_html() -> str:
       setInterval(fetchPower, 1000);
     });
 
+    let resizeTimer = null;
     window.addEventListener('resize', () => {
-      drawPowerChart(powerData.history, powerData.forecast);
+      if (resizeTimer) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        fetchPower(); // fetch latest power + forecast for every chart redraw
+      }, 200);
     });
   </script>
 </head>
