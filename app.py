@@ -224,7 +224,7 @@ def save_state(doc: Dict[str, Any]) -> None:
 # -----------------------------
 POWER_RETENTION_DAYS = 30
 POWER_RETENTION_SECONDS = POWER_RETENTION_DAYS * 24 * 3600
-POWER_FEATURE_WINDOW = 30  # number of most recent samples used as features
+POWER_FEATURE_WINDOW = 120  # number of most recent samples used as features
 FORECAST_HORIZON_STEPS = 30  # number of steps to predict ahead
 MODEL_TRAIN_INTERVAL = 3600.0  # seconds between retraining runs
 POWER_HISTORY_SECONDS = 180  # short window for UI chart
