@@ -388,6 +388,7 @@ class VirtualPro3EM:
             solver="adam",
             max_iter=400,
             random_state=42,
+            verbose=True,
         )
         model.fit(X, Y)
         preds = model.predict(X)
