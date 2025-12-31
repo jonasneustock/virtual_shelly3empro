@@ -4,6 +4,7 @@ Overview
 
 - Emulates a Shelly Pro 3EM device. It polls power/voltage/current/PF values from Home Assistant (HA) and exposes Shelly-like RPC over HTTP, WebSocket, and UDP, with mDNS discovery and simple energy integration/persistence.
 - Useful for gateways/apps that expect a Shelly 3‑phase power meter on the LAN (e.g., Shelly app, b2500 integrations, custom dashboards).
+- See detailed architecture and operational notes in `TECHNICAL_DOC.md`.
 
 Features
 
@@ -26,7 +27,8 @@ Features
   - Defaults to TCP port 502 with unit ID 1 (configurable via env vars).
 - mDNS service advertisements (`_http._tcp` and `_shelly._tcp`) for discovery.
 - Energy counters integrated from power over time and persisted at `/data/state.json` (via Docker volume).
- - Simple `/metrics` endpoint with Prometheus‑style counters for HTTP/WS/UDP events.
+- Simple `/metrics` endpoint with Prometheus‑style counters for HTTP/WS/UDP events.
+- UI power chart with live autoencoder-based forecasting (configurable window/horizon via env vars); forecast values displayed alongside current power and plotted in red.
 
 Quick Start (Docker Compose)
 
@@ -87,6 +89,12 @@ Configuration (env vars)
   - `STRICT_MINIMAL_PAYLOAD`: when `true`, HTTP/WS `EM.GetStatus` returns only `{a_act_power,b_act_power,c_act_power,total_act_power}` (some gateways prefer this).
 - Persistence
   - `STATE_PATH`: defaults to `/data/state.json` (mounted via volume in Compose).
+- Forecasting / ML
+  - `POWER_RETENTION_DAYS`: how long to retain the training dataset (default `30`).
+  - `POWER_FEATURE_WINDOW`: number of most recent samples used as model input features (default `30`).
+  - `FORECAST_HORIZON_STEPS`: number of forward steps predicted each cycle (default `30`).
+  - `MODEL_TRAIN_INTERVAL`: seconds between automatic retraining runs (default `3600.0`).
+  - `POWER_HISTORY_SECONDS`: window of power history returned for the UI chart (default `180`).
 
 APIs
 

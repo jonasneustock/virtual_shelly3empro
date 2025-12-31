@@ -200,6 +200,22 @@ def _smooth_value(entity_id: str, value: float) -> float:
             return value
         return sum(buf) / len(buf)
 
+
+def _int_env(name: str, default: int, min_value: int = 1) -> int:
+    try:
+        val = int(os.getenv(name, str(default)))
+    except Exception:
+        val = default
+    return max(min_value, val)
+
+
+def _float_env(name: str, default: float, min_value: float = 0.0) -> float:
+    try:
+        val = float(os.getenv(name, str(default)))
+    except Exception:
+        val = default
+    return max(min_value, val)
+
 def now_ts() -> int:
     return int(time.time())
 
@@ -222,12 +238,12 @@ def save_state(doc: Dict[str, Any]) -> None:
 # -----------------------------
 # Virtual meter state
 # -----------------------------
-POWER_RETENTION_DAYS = 30
+POWER_RETENTION_DAYS = _int_env("POWER_RETENTION_DAYS", 30, 1)
 POWER_RETENTION_SECONDS = POWER_RETENTION_DAYS * 24 * 3600
-POWER_FEATURE_WINDOW = 120  # number of most recent samples used as features
-FORECAST_HORIZON_STEPS = 30  # number of steps to predict ahead
-MODEL_TRAIN_INTERVAL = 3600.0  # seconds between retraining runs
-POWER_HISTORY_SECONDS = 180  # short window for UI chart
+POWER_FEATURE_WINDOW = _int_env("POWER_FEATURE_WINDOW", 30, 1)  # number of most recent samples used as features
+FORECAST_HORIZON_STEPS = _int_env("FORECAST_HORIZON_STEPS", 30, 1)  # number of steps to predict ahead
+MODEL_TRAIN_INTERVAL = _float_env("MODEL_TRAIN_INTERVAL", 3600.0, 1.0)  # seconds between retraining runs
+POWER_HISTORY_SECONDS = _int_env("POWER_HISTORY_SECONDS", 180, 1)  # short window for UI chart
 
 class Phase(BaseModel):
     voltage: Optional[float] = None

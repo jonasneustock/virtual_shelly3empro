@@ -44,6 +44,7 @@ def dashboard_html() -> str:
         const ts = data.ts || (Date.now() / 1000);
         document.getElementById('power-updated').textContent = new Date(ts * 1000).toLocaleTimeString();
         updateModelMetrics(data.model || {});
+        setForecastHorizon(data);
         renderForecastValues(powerData.forecast);
         drawPowerChart(powerData.history, powerData.forecast);
       } catch (e) {
@@ -72,6 +73,12 @@ def dashboard_html() -> str:
         btn.textContent = `Train on dataset (${total} pts)`;
         btn.disabled = total < 2;
       }
+    }
+
+    function setForecastHorizon(data) {
+      const horizon = (data.model && data.model.horizon) || (data.forecast ? data.forecast.length : 0);
+      const el = document.getElementById('forecast-horizon');
+      if (el) el.textContent = horizon || '-';
     }
 
     function renderForecastValues(forecast) {
@@ -282,7 +289,7 @@ def dashboard_html() -> str:
     <h2>Power (live)</h2>
     <div class="row" style="margin-bottom:6px">
       <div>Current total: <b id="current-power">-</b> W</div>
-      <div class="muted">Forecast for next 30s is shown in red.</div>
+      <div class="muted">Forecast for next <span id="forecast-horizon">30</span>s is shown in red.</div>
     </div>
     <div class="muted" style="margin-bottom:6px">Power updated: <span id="power-updated">-</span> · <span id="power-range"></span></div>
     <div class="muted" style="margin-bottom:6px">Forecast values: <span id="forecast-values">-</span></div>
