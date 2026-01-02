@@ -29,6 +29,7 @@ Features
 - Energy counters integrated from power over time and persisted at `/data/state.json` (via Docker volume).
 - Simple `/metrics` endpoint with Prometheus‑style counters for HTTP/WS/UDP events.
 - UI power chart with live autoencoder-based forecasting (configurable window/horizon via env vars); forecast values displayed alongside current power and plotted in red.
+- HA polling resiliency: model training runs in a background thread so polling keeps running even during fits; manual training remains synchronous for immediate feedback.
 
 Quick Start (Docker Compose)
 

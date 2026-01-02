@@ -36,6 +36,7 @@
    - Model: `MLPRegressor` with hidden layers (64,16,64), trained hourly (`MODEL_TRAIN_INTERVAL`) or on manual trigger.
    - Metrics: MSE, MAPE, sample count; exposed in `/ui/power` for display.
    - Logging: training start/skip/errors, forecast inputs/outputs.
+   - Poller resiliency: scheduled training runs in a background thread so HA polling isn’t blocked by model fitting; manual training remains synchronous for immediate feedback.
 
 ## Files of Interest
 - `app.py`: FastAPI app, state machine (`VirtualPro3EM`), polling, forecasting, endpoints.

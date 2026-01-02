@@ -296,6 +296,8 @@ class VirtualPro3EM:
         self.model_metrics: Dict[str, Any] = {"mse": None, "mape": None, "n": 0}
         self.model: Optional[MLPRegressor] = None
         self.model_ref_ts: Optional[float] = None
+        self._training_lock = threading.Lock()
+        self._training_in_progress = False
         self.config: Dict[str, Any] = {
             "device": {
                 "id": DEVICE_ID,
@@ -369,16 +371,36 @@ class VirtualPro3EM:
                 series = list(self.power_dataset)
                 should_train = True
         if should_train and series:
-            try:
-                log.info("Starting scheduled model training (%d samples)", len(series))
-                self.train_power_model(series, trained_at=now)
-            except Exception as exc:
-                log.error("Scheduled model training failed: %s", exc, exc_info=True)
+            self._start_background_training(series, trained_at=now, reason="scheduled")
 
     def _prune_power_dataset(self, now_ts: float) -> None:
         cutoff = now_ts - POWER_RETENTION_SECONDS
         while self.power_dataset and self.power_dataset[0][0] < cutoff:
             self.power_dataset.popleft()
+
+    def _start_background_training(self, series: List[Tuple[float, float]], trained_at: float, reason: str) -> None:
+        if not series:
+            return
+        if len(series) < (POWER_FEATURE_WINDOW + FORECAST_HORIZON_STEPS):
+            log.warning("Training skipped (%s): insufficient samples (%d)", reason, len(series))
+            return
+        with self._training_lock:
+            if self._training_in_progress:
+                log.info("Training already in progress; skipping %s trigger", reason)
+                return
+            self._training_in_progress = True
+
+        def _worker():
+            try:
+                log.info("Starting %s model training (%d samples)", reason, len(series))
+                self.train_power_model(series, trained_at=trained_at)
+            except Exception as exc:
+                log.error("Background training (%s) failed: %s", reason, exc, exc_info=True)
+            finally:
+                with self._training_lock:
+                    self._training_in_progress = False
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _build_training_matrices(self, series: List[Tuple[float, float]]) -> Tuple[List[List[float]], List[List[float]]]:
         powers = [p for _, p in series]
@@ -445,6 +467,7 @@ class VirtualPro3EM:
             return {"ok": False, "error": "not enough data", "dataset_total": dataset_total}
         ts = time.time()
         log.info("Manual training triggered over full dataset (%d samples)", dataset_total)
+        # Manual training runs synchronously to return immediate metrics
         self.train_power_model(series, trained_at=ts)
         with self.lock:
             metrics = dict(self.model_metrics)
