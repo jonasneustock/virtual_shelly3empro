@@ -36,7 +36,7 @@
    - Model: `MLPRegressor` with hidden layers (64,16,64), trained hourly (`MODEL_TRAIN_INTERVAL`) or on manual trigger.
    - Metrics: MSE, MAPE, sample count; exposed in `/ui/power` for display.
    - Logging: training start/skip/errors, forecast inputs/outputs.
-   - Poller resiliency: scheduled training runs in a background thread so HA polling isn’t blocked by model fitting; manual training remains synchronous for immediate feedback.
+   - Poller resiliency: all training (scheduled and manual) runs in a background thread so HA polling isn’t blocked; check logs/UI metrics for completion.
 
 ## Files of Interest
 - `app.py`: FastAPI app, state machine (`VirtualPro3EM`), polling, forecasting, endpoints.
@@ -86,6 +86,7 @@
 - **Metrics**: `GET /metrics`.
 - **Logs**: Training/forecast logs include input/outputs and errors; check container logs or stdout.
 - **Admin overview**: `GET /admin/overview` (counts + recent clients).
+- **HA polling visibility**: `/healthz` includes `last_poll_ok`, `last_poll_age`, and `last_poll_error` to surface HA issues; polling logs warn/error on HA failures and do not block the loop.
 - **UDP**: test with `nc -u`; try configured `UDP_PORTS`.
 - **WS**: connect to `/rpc`; expect `NotifyFullStatus` then throttled `NotifyStatus`.
 

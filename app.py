@@ -124,7 +124,7 @@ except Exception:
 # -----------------------------
 # Helpers
 # -----------------------------
-def ha_get(entity_id: str) -> Optional[float]:
+def ha_get(entity_id: str, label: str = "") -> Optional[float]:
     if not entity_id:
         return None
     url = f"{HA_BASE_URL}/api/states/{entity_id}"
@@ -132,16 +132,26 @@ def ha_get(entity_id: str) -> Optional[float]:
     try:
         r = requests.get(url, headers=headers, timeout=3)
         if r.status_code != 200:
+            log.warning("HA GET %s failed: status=%s", label or entity_id, r.status_code)
             return None
         data = r.json()
         raw = data.get("state")
         if raw in (None, "unknown", "unavailable", ""):
+            log.warning("HA GET %s returned unavailable/unknown", label or entity_id)
             return None
-        value = float(raw)
-        if HA_SMOOTHING_ENABLE:
-            value = _smooth_value(entity_id, value)
+        try:
+            value = float(raw)
+        except Exception as exc:
+            log.warning("HA GET %s parse error: %s", label or entity_id, exc)
+            return None
+        try:
+            if HA_SMOOTHING_ENABLE:
+                value = _smooth_value(entity_id, value)
+        except Exception as exc:
+            log.error("HA smoothing failed for %s: %s", label or entity_id, exc, exc_info=True)
         return value
-    except Exception:
+    except Exception as exc:
+        log.error("HA request error for %s: %s", label or entity_id, exc, exc_info=True)
         return None
 
 
@@ -285,6 +295,9 @@ class VirtualPro3EM:
         self.lock = threading.RLock()
         self.last_poll_mono: Optional[float] = None
         self.last_persist_mono: float = time.monotonic()
+        self.last_poll_ts: Optional[float] = None
+        self.last_poll_ok: bool = False
+        self.last_poll_error: Optional[str] = None
         self.phases = {"a": Phase(), "b": Phase(), "c": Phase()}
         self.frequency = 50.0
         self.energy = EnergyCounters()
@@ -466,18 +479,13 @@ class VirtualPro3EM:
             log.warning("Manual training aborted: not enough data (%d)", dataset_total)
             return {"ok": False, "error": "not enough data", "dataset_total": dataset_total}
         ts = time.time()
-        log.info("Manual training triggered over full dataset (%d samples)", dataset_total)
-        # Manual training runs synchronously to return immediate metrics
-        self.train_power_model(series, trained_at=ts)
-        with self.lock:
-            metrics = dict(self.model_metrics)
+        log.info("Manual training requested over full dataset (%d samples)", dataset_total)
+        self._start_background_training(series, trained_at=ts, reason="manual")
         return {
             "ok": True,
             "trained_at": ts,
             "dataset_total": dataset_total,
-            "mse": metrics.get("mse"),
-            "mape": metrics.get("mape"),
-            "n": metrics.get("n"),
+            "note": "training started in background; check logs/UI metrics for completion",
         }
 
     def get_power_history(self, window_seconds: int = 180) -> List[Tuple[float, float]]:
@@ -547,27 +555,51 @@ class VirtualPro3EM:
         }
 
     def poll_home_assistant(self):
+        total_power = 0.0
+        poll_ok = True
+        err_msg: Optional[str] = None
         try:
-            total_power = 0.0
-            a_w = ha_get(A_POWER) or 0.0
-            b_w = ha_get(B_POWER) or 0.0
-            c_w = ha_get(C_POWER) or 0.0
+            a_w = ha_get(A_POWER, "A_POWER")
+            b_w = ha_get(B_POWER, "B_POWER")
+            c_w = ha_get(C_POWER, "C_POWER")
+            if any(x is None for x in (a_w, b_w, c_w)):
+                poll_ok = False
+                err_msg = "missing power values from HA"
+            voltages = (
+                ha_get(A_VOLT, "A_VOLT"),
+                ha_get(B_VOLT, "B_VOLT"),
+                ha_get(C_VOLT, "C_VOLT"),
+            )
+            currents = (
+                ha_get(A_CURR, "A_CURR"),
+                ha_get(B_CURR, "B_CURR"),
+                ha_get(C_CURR, "C_CURR"),
+            )
+            pfs = (
+                ha_get(A_PF, "A_PF"),
+                ha_get(B_PF, "B_PF"),
+                ha_get(C_PF, "C_PF"),
+            )
+
+            if not poll_ok:
+                raise ValueError(err_msg or "poll incomplete")
+
             with self.lock:
-                self.phases["a"].act_power = float(a_w)
-                self.phases["b"].act_power = float(b_w)
-                self.phases["c"].act_power = float(c_w)
+                self.phases["a"].act_power = float(a_w or 0.0)
+                self.phases["b"].act_power = float(b_w or 0.0)
+                self.phases["c"].act_power = float(c_w or 0.0)
 
-                self.phases["a"].voltage = ha_get(A_VOLT)
-                self.phases["b"].voltage = ha_get(B_VOLT)
-                self.phases["c"].voltage = ha_get(C_VOLT)
+                self.phases["a"].voltage = voltages[0]
+                self.phases["b"].voltage = voltages[1]
+                self.phases["c"].voltage = voltages[2]
 
-                self.phases["a"].current = ha_get(A_CURR)
-                self.phases["b"].current = ha_get(B_CURR)
-                self.phases["c"].current = ha_get(C_CURR)
+                self.phases["a"].current = currents[0]
+                self.phases["b"].current = currents[1]
+                self.phases["c"].current = currents[2]
 
-                self.phases["a"].pf = ha_get(A_PF) or None
-                self.phases["b"].pf = ha_get(B_PF) or None
-                self.phases["c"].pf = ha_get(C_PF) or None
+                self.phases["a"].pf = pfs[0] or None
+                self.phases["b"].pf = pfs[1] or None
+                self.phases["c"].pf = pfs[2] or None
 
                 total_power = float((self.phases["a"].act_power or 0.0) + (self.phases["b"].act_power or 0.0) + (self.phases["c"].act_power or 0.0))
 
@@ -585,8 +617,18 @@ class VirtualPro3EM:
             if (now_mono - self.last_persist_mono) >= 30.0:
                 self.persist()
                 self.last_persist_mono = now_mono
-        except Exception:
-            pass
+
+            with self.lock:
+                self.last_poll_ok = True
+                self.last_poll_ts = now_ts()
+                self.last_poll_error = None
+        except Exception as exc:
+            poll_ok = False
+            err_text = err_msg or str(exc)
+            log.error("HA polling failed: %s", err_text, exc_info=True)
+            with self.lock:
+                self.last_poll_ok = False
+                self.last_poll_error = err_text
 
     # ---------- RPC builders ----------
     def em_get_status(self, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -1308,7 +1350,21 @@ async def rpc_get_method(method: str, request: Request) -> JSONResponse:
 
 @app.get("/healthz")
 def healthz():
-    return {"status": "ok", "ts": now_ts(), "device": DEVICE_ID}
+    with VM.lock:
+        last_poll_ok = VM.last_poll_ok
+        last_poll_ts = VM.last_poll_ts
+        last_poll_error = VM.last_poll_error
+    age = None
+    if last_poll_ts:
+        age = max(0, now_ts() - int(last_poll_ts))
+    return {
+        "status": "ok",
+        "ts": now_ts(),
+        "device": DEVICE_ID,
+        "last_poll_ok": last_poll_ok,
+        "last_poll_age": age,
+        "last_poll_error": last_poll_error,
+    }
 
 @app.get("/metrics")
 def metrics():
@@ -1577,11 +1633,14 @@ def shelly_http_info():
 # -----------------------------
 def poll_loop():
     while True:
-        VM.poll_home_assistant()
-        if MODBUS_BRIDGE:
-            MODBUS_BRIDGE.update()
-        # Throttled WS notify broadcast
         try:
+            VM.poll_home_assistant()
+        except Exception as exc:
+            log.error("Poll loop failed: %s", exc, exc_info=True)
+        try:
+            if MODBUS_BRIDGE:
+                MODBUS_BRIDGE.update()
+            # Throttled WS notify broadcast
             global _last_notify_mono
             global _last_notify_values
             now_m = time.monotonic()
@@ -1609,8 +1668,8 @@ def poll_loop():
                         pass
                     _last_notify_values = current
                     _last_notify_mono = now_m
-        except Exception:
-            pass
+        except Exception as exc:
+            log.error("Post-poll tasks failed: %s", exc, exc_info=True)
         time.sleep(POLL_INTERVAL)
 threading.Thread(target=poll_loop, daemon=True).start()
 
