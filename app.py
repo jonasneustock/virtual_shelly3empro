@@ -7,6 +7,7 @@ import asyncio
 import logging
 import struct
 import signal
+import joblib
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List, Tuple, Deque
 from collections import defaultdict, deque
@@ -76,6 +77,7 @@ MANUFACTURER = os.getenv("MANUFACTURER", "Allterco Robotics")
 GENERATION = int(os.getenv("GENERATION", "2"))
 
 STATE_PATH = os.getenv("STATE_PATH", "/data/state.json")
+MODEL_PATH = os.getenv("MODEL_PATH", STATE_PATH + ".model")
 
 # Networking
 HTTP_PORT = int(os.getenv("HTTP_PORT", "8080"))
@@ -259,6 +261,24 @@ def save_state(doc: Dict[str, Any]) -> None:
         json.dump(doc, f)
     os.replace(tmp, STATE_PATH)
 
+
+def save_model(model: Any) -> None:
+    try:
+        os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
+        joblib.dump(model, MODEL_PATH)
+    except Exception as exc:
+        log.error("Failed to persist model: %s", exc, exc_info=True)
+
+
+def load_model() -> Optional[Any]:
+    if not os.path.exists(MODEL_PATH):
+        return None
+    try:
+        return joblib.load(MODEL_PATH)
+    except Exception as exc:
+        log.error("Failed to load model: %s", exc, exc_info=True)
+        return None
+
 # -----------------------------
 # Virtual meter state
 # -----------------------------
@@ -337,6 +357,17 @@ class VirtualPro3EM:
         # Seed short history for UI from persisted dataset
         for ts, p in list(self.power_dataset)[-len(self.power_history):]:
             self.power_history.append((ts, p))
+        if persisted.get("model_metrics"):
+            self.model_metrics = persisted.get("model_metrics", self.model_metrics)
+        if persisted.get("model_params"):
+            self.model_params = persisted.get("model_params", self.model_params)
+        if persisted.get("last_model_train") is not None:
+            self.last_model_train = persisted.get("last_model_train")
+        # Attempt to load persisted model artifact
+        loaded_model = load_model()
+        if loaded_model:
+            self.model = loaded_model
+            log.info("Loaded persisted model from %s", MODEL_PATH)
 
     def persist(self):
         now = time.time()
@@ -345,6 +376,9 @@ class VirtualPro3EM:
             doc = {
                 "energy": json.loads(self.energy.json()),
                 "power_dataset": list(self.power_dataset),
+                "model_metrics": self.model_metrics,
+                "model_params": self.model_params,
+                "last_model_train": self.last_model_train,
             }
         save_state(doc)
 
@@ -468,6 +502,7 @@ class VirtualPro3EM:
             }
             self.model_metrics = {"mse": mse, "mape": mape, "n": len(X)}
             self.last_model_train = ts_trained
+            save_model(model)
         log.info("Model trained: mse=%.4f mape=%.2f%% n=%d", mse, mape, len(X))
 
     def trigger_full_training(self) -> Dict[str, Any]:

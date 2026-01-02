@@ -5,6 +5,7 @@
 - **Main entry**: `app.py`
 - **Packages**: Core logic in `virtual_shelly/` (`metrics.py`, `rpc_core.py`, `udp_server.py`, `ui.py`).
 - **Persistence**: Energy counters and training dataset persisted to `STATE_PATH` (default `/data/state.json`).
+- **Model persistence**: Trained model persisted via `MODEL_PATH` (default `STATE_PATH + ".model"`); metadata saved alongside state.
 - **Networking**:
   - HTTP/WS server on `HTTP_PORT`.
   - WS fan-out servers on TCP ports `WS_PORT_START`–`WS_PORT_END`.

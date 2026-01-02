@@ -31,6 +31,7 @@ Features
 - UI power chart with live autoencoder-based forecasting (configurable window/horizon via env vars); forecast values displayed alongside current power and plotted in red.
 - HA polling resiliency: all training (scheduled and manual) runs in a background thread so polling keeps running even during fits.
 - HA health: `/healthz` now includes polling status, age, and last error; HA fetch failures are logged and do not block the loop.
+- Model persistence: trained model is saved to `MODEL_PATH` (defaults to `<STATE_PATH>.model`) and reloaded on startup, with metrics/params stored alongside state.
 
 Quick Start (Docker Compose)
 
