@@ -102,6 +102,9 @@ MODBUS_UNIT_ID = int(os.getenv("MODBUS_UNIT_ID", "1"))
 # Payload shape tweak (Marstek/Hoymiles consumers)
 STRICT_MINIMAL_PAYLOAD = os.getenv("STRICT_MINIMAL_PAYLOAD", "false").lower() in ("1", "true", "yes")
 
+# Forecasting
+FORECAST_ENABLE = os.getenv("FORECAST_ENABLE", "false").lower() in ("1", "true", "yes")
+
 # WS notify throttle (seconds)
 WS_NOTIFY_INTERVAL = float(os.getenv("WS_NOTIFY_INTERVAL", "2.0"))
 # WS notify coalescing threshold (watts); broadcast only if delta >= EPS
@@ -219,6 +222,17 @@ def _float_env(name: str, default: float, min_value: float = 0.0) -> float:
 def now_ts() -> int:
     return int(time.time())
 
+
+def _set_forecast_cache(forecast: List[Tuple[float, float]]) -> None:
+    global _FORECAST_CACHE
+    with _FORECAST_LOCK:
+        _FORECAST_CACHE = list(forecast)
+
+
+def _get_forecast_cache() -> List[Tuple[float, float]]:
+    with _FORECAST_LOCK:
+        return list(_FORECAST_CACHE)
+
 def load_state() -> Dict[str, Any]:
     if not os.path.exists(STATE_PATH):
         return {}
@@ -244,6 +258,10 @@ POWER_FEATURE_WINDOW = _int_env("POWER_FEATURE_WINDOW", 30, 1)  # number of most
 FORECAST_HORIZON_STEPS = _int_env("FORECAST_HORIZON_STEPS", 30, 1)  # number of steps to predict ahead
 MODEL_TRAIN_INTERVAL = _float_env("MODEL_TRAIN_INTERVAL", 3600.0, 1.0)  # seconds between retraining runs
 POWER_HISTORY_SECONDS = _int_env("POWER_HISTORY_SECONDS", 180, 1)  # short window for UI chart
+FORECAST_INTERVAL = _float_env("FORECAST_INTERVAL", 2.0, 0.2)  # background forecast refresh cadence
+
+_FORECAST_LOCK = threading.RLock()
+_FORECAST_CACHE: List[Tuple[float, float]] = []
 
 class Phase(BaseModel):
     voltage: Optional[float] = None
@@ -485,7 +503,7 @@ class VirtualPro3EM:
 
     def build_power_snapshot(self) -> Dict[str, Any]:
         history = self.get_power_history(window_seconds=POWER_HISTORY_SECONDS)
-        forecast = self.forecast_power(history=history)
+        forecast = _get_forecast_cache() if FORECAST_ENABLE else []
         current_ts, current_power = history[-1]
         with self.lock:
             model = dict(self.model_params)
@@ -1018,6 +1036,7 @@ NOTIFIER_TASK: Optional[asyncio.Task] = None
 APP_LOOP: Optional[asyncio.AbstractEventLoop] = None
 _last_notify_mono: float = time.monotonic()
 _last_notify_values: Optional[Tuple[float, float, float, float]] = None
+_FORECAST_THREAD: Optional[threading.Thread] = None
 
 # -----------------------------
 # Metrics (simple Prometheus-like text output)
@@ -1073,6 +1092,22 @@ def _enqueue_ws_broadcast(msg: str):
         APP_LOOP.call_soon_threadsafe(WS_QUEUE.put_nowait, msg)
     except Exception:
         pass
+
+
+def _forecast_worker() -> None:
+    while True:
+        try:
+            history = VM.get_power_history(window_seconds=POWER_HISTORY_SECONDS)
+            with VM.lock:
+                model_ready = VM.model is not None
+            if not model_ready or len(history) < POWER_FEATURE_WINDOW:
+                _set_forecast_cache([])
+            else:
+                forecast = VM.forecast_power(history=history)
+                _set_forecast_cache(forecast)
+        except Exception as exc:
+            log.error("Forecast worker failed: %s", exc, exc_info=True)
+        time.sleep(FORECAST_INTERVAL)
 
 METHODS = RPC.build_methods(VM)
 
@@ -1598,10 +1633,13 @@ async def ws_handler(websocket):
 
 @app.on_event("startup")
 async def _on_startup():
-    global WS_QUEUE, NOTIFIER_TASK, APP_LOOP
+    global WS_QUEUE, NOTIFIER_TASK, APP_LOOP, _FORECAST_THREAD
     APP_LOOP = asyncio.get_running_loop()
     WS_QUEUE = asyncio.Queue()
     NOTIFIER_TASK = asyncio.create_task(_ws_notifier_worker())
+    if FORECAST_ENABLE and _FORECAST_THREAD is None:
+        _FORECAST_THREAD = threading.Thread(target=_forecast_worker, daemon=True)
+        _FORECAST_THREAD.start()
     log.info("Service startup: device_id=%s model=%s fw=%s http_port=%s", DEVICE_ID, MODEL, FIRMWARE, HTTP_PORT)
 
 
