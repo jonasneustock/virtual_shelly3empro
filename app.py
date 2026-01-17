@@ -294,22 +294,31 @@ class VirtualPro3EM:
             a_w = ha_get(A_POWER) or 0.0
             b_w = ha_get(B_POWER) or 0.0
             c_w = ha_get(C_POWER) or 0.0
+            a_volt = ha_get(A_VOLT)
+            b_volt = ha_get(B_VOLT)
+            c_volt = ha_get(C_VOLT)
+            a_curr = ha_get(A_CURR)
+            b_curr = ha_get(B_CURR)
+            c_curr = ha_get(C_CURR)
+            a_pf = ha_get(A_PF) or None
+            b_pf = ha_get(B_PF) or None
+            c_pf = ha_get(C_PF) or None
             with self.lock:
                 self.phases["a"].act_power = float(a_w)
                 self.phases["b"].act_power = float(b_w)
                 self.phases["c"].act_power = float(c_w)
 
-                self.phases["a"].voltage = ha_get(A_VOLT)
-                self.phases["b"].voltage = ha_get(B_VOLT)
-                self.phases["c"].voltage = ha_get(C_VOLT)
+                self.phases["a"].voltage = a_volt
+                self.phases["b"].voltage = b_volt
+                self.phases["c"].voltage = c_volt
 
-                self.phases["a"].current = ha_get(A_CURR)
-                self.phases["b"].current = ha_get(B_CURR)
-                self.phases["c"].current = ha_get(C_CURR)
+                self.phases["a"].current = a_curr
+                self.phases["b"].current = b_curr
+                self.phases["c"].current = c_curr
 
-                self.phases["a"].pf = ha_get(A_PF) or None
-                self.phases["b"].pf = ha_get(B_PF) or None
-                self.phases["c"].pf = ha_get(C_PF) or None
+                self.phases["a"].pf = a_pf
+                self.phases["b"].pf = b_pf
+                self.phases["c"].pf = c_pf
 
             # Integrate using monotonic time to avoid wall clock jumps
             now_mono = time.monotonic()
