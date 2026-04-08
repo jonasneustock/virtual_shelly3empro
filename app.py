@@ -56,6 +56,12 @@ SHELLY_BASE_URLS = [
     if u.strip()
 ]
 SHELLY_TIMEOUT = float(os.getenv("SHELLY_TIMEOUT", "3.0"))
+SHELLY_API_MODE = os.getenv("SHELLY_API_MODE", "auto").strip().lower()
+SHELLY_API_MODES = [
+    m.strip().lower() or "auto"
+    for m in os.getenv("SHELLY_API_MODES", "").split(",")
+    if m.strip()
+]
 
 A_POWER = os.getenv("A_POWER", "sensor.phase_a_power")
 B_POWER = os.getenv("B_POWER", "sensor.phase_b_power")
@@ -167,28 +173,109 @@ def _shelly_sources() -> List[str]:
     return []
 
 
-def shelly_get_em_status(base_url: str) -> Optional[Dict[str, Any]]:
+def _shelly_source_modes() -> Dict[str, str]:
+    sources = _shelly_sources()
+    modes: Dict[str, str] = {}
+    for i, source in enumerate(sources):
+        mode = "auto"
+        if i < len(SHELLY_API_MODES):
+            mode = SHELLY_API_MODES[i]
+        elif SHELLY_API_MODE:
+            mode = SHELLY_API_MODE
+        if mode not in ("auto", "gen2_rpc", "gen1_emeter"):
+            mode = "auto"
+        modes[source] = mode
+    return modes
+
+
+_SHELLY_API_DETECTED: Dict[str, str] = {}
+_SHELLY_API_LOCK = threading.RLock()
+
+
+def _shelly_request_json(url: str) -> Optional[Dict[str, Any]]:
+    headers = {"Content-Type": "application/json"}
+    try:
+        r = requests.get(url, headers=headers, timeout=SHELLY_TIMEOUT)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        return None
+    return None
+
+
+def _shelly_extract_gen2_status(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not isinstance(data, dict):
+        return None
+    if "result" in data and isinstance(data["result"], dict):
+        return data["result"]
+    if "a_act_power" in data or "total_act_power" in data:
+        return data
+    return None
+
+
+def _shelly_get_gen2_status(base_url: str) -> Optional[Dict[str, Any]]:
+    for url in (f"{base_url}/rpc/EM.GetStatus?id=0", f"{base_url}/rpc?method=EM.GetStatus&id=0"):
+        payload = _shelly_request_json(url)
+        status = _shelly_extract_gen2_status(payload or {})
+        if status:
+            return status
+    return None
+
+
+def _shelly_get_gen1_status(base_url: str) -> Optional[Dict[str, Any]]:
+    phases = []
+    for idx in (0, 1, 2):
+        payload = _shelly_request_json(f"{base_url}/emeter/{idx}")
+        if not payload:
+            return None
+        phases.append(payload)
+    return {
+        "a_act_power": phases[0].get("power"),
+        "b_act_power": phases[1].get("power"),
+        "c_act_power": phases[2].get("power"),
+        "a_voltage": phases[0].get("voltage"),
+        "b_voltage": phases[1].get("voltage"),
+        "c_voltage": phases[2].get("voltage"),
+        "a_current": phases[0].get("current"),
+        "b_current": phases[1].get("current"),
+        "c_current": phases[2].get("current"),
+        "a_pf": phases[0].get("pf"),
+        "b_pf": phases[1].get("pf"),
+        "c_pf": phases[2].get("pf"),
+    }
+
+
+def shelly_get_em_status(base_url: str, mode: str = "auto") -> Optional[Dict[str, Any]]:
     if not base_url:
         return None
-    headers = {"Content-Type": "application/json"}
-    urls = [
-        f"{base_url}/rpc/EM.GetStatus?id=0",
-        f"{base_url}/rpc?method=EM.GetStatus&id=0",
-    ]
-    for url in urls:
-        try:
-            r = requests.get(url, headers=headers, timeout=SHELLY_TIMEOUT)
-            if r.status_code != 200:
-                continue
-            data = r.json()
-            if isinstance(data, dict):
-                # Support direct result and JSON-RPC envelope
-                if "result" in data and isinstance(data["result"], dict):
-                    return data["result"]
-                return data
-        except Exception:
-            continue
-    return None
+
+    mode = (mode or "auto").lower()
+    with _SHELLY_API_LOCK:
+        detected_mode = _SHELLY_API_DETECTED.get(base_url)
+
+    if mode == "auto" and detected_mode in ("gen2_rpc", "gen1_emeter"):
+        mode = detected_mode
+
+    status: Optional[Dict[str, Any]] = None
+    used_mode = mode
+
+    if mode in ("auto", "gen2_rpc"):
+        status = _shelly_get_gen2_status(base_url)
+        if status:
+            used_mode = "gen2_rpc"
+
+    if not status and mode in ("auto", "gen1_emeter"):
+        status = _shelly_get_gen1_status(base_url)
+        if status:
+            used_mode = "gen1_emeter"
+
+    if status and used_mode in ("gen2_rpc", "gen1_emeter"):
+        with _SHELLY_API_LOCK:
+            _SHELLY_API_DETECTED[base_url] = used_mode
+    return status
 
 
 def shelly_get_em_status_aggregated() -> Dict[str, float]:
@@ -208,8 +295,9 @@ def shelly_get_em_status_aggregated() -> Dict[str, float]:
     }
     contributors = {k: 0 for k in totals}
 
+    source_modes = _shelly_source_modes()
     for source in _shelly_sources():
-        status = shelly_get_em_status(source)
+        status = shelly_get_em_status(source, source_modes.get(source, "auto"))
         if not status:
             continue
         for key in totals:

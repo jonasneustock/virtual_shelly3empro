@@ -14,6 +14,8 @@ services:
       # SHELLY_BASE_URL: "http://192.168.1.120"
       # SHELLY_BASE_URLS: "http://192.168.1.120,http://192.168.1.121"
       # SHELLY_TIMEOUT: "3.0"
+      # SHELLY_API_MODE: "auto"                # auto|gen2_rpc|gen1_emeter
+      # SHELLY_API_MODES: "gen1_emeter,auto"   # optional per URL (same order as SHELLY_BASE_URLS)
 
       DEVICE_ID: "485519d74a28"
       MODEL: "SPEM-003CEBEU"

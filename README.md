@@ -58,6 +58,8 @@ Configuration (env vars)
     - `SHELLY_BASE_URL`: base URL of one upstream Shelly (for example `http://192.168.1.120`)
     - `SHELLY_BASE_URLS`: comma-separated list of Shelly base URLs to aggregate (takes precedence over `SHELLY_BASE_URL`)
     - `SHELLY_TIMEOUT`: HTTP timeout in seconds for Shelly requests (default `3.0`)
+    - `SHELLY_API_MODE`: API mode for all configured Shelly devices (`auto`, `gen2_rpc`, `gen1_emeter`; default `auto`)
+    - `SHELLY_API_MODES`: optional comma-separated API modes per configured URL (same order as `SHELLY_BASE_URLS`; overrides `SHELLY_API_MODE` per device)
 - Device identity
   - `DEVICE_ID`: Device identifier reported in RPC/mDNS (default `shellypro3em-virtual-001`)
   - `APP_ID`: Shelly application identifier (default `shellypro3em`)
@@ -131,7 +133,7 @@ Home Assistant polling
 
 Shelly Web API polling
 
-- When `INPUT_SOURCE=shelly_webapi`, each poll fetches `EM.GetStatus` from one or more configured Shelly devices using HTTP endpoints (`/rpc/EM.GetStatus?id=0`, fallback `/rpc?method=EM.GetStatus&id=0`).
+- When `INPUT_SOURCE=shelly_webapi`, each poll auto-detects the API style per configured Shelly device. It first tries Gen2 RPC (`/rpc/EM.GetStatus?id=0`, fallback `/rpc?method=EM.GetStatus&id=0`) and falls back to legacy Gen1 `/emeter/0..2` when needed.
 - For multiple devices (`SHELLY_BASE_URLS`), per-phase values are aggregated:
   - `a/b/c_act_power` and `a/b/c_current`: summed across Shelly devices.
   - `a/b/c_voltage` and `a/b/c_pf`: averaged across Shelly devices that returned values.
