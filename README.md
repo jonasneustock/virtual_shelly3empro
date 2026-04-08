@@ -51,8 +51,13 @@ Configuration (env vars)
   - `HA_BASE_URL`: e.g. `http://homeassistant:8123` or `http://192.168.x.x:8123`
   - `HA_TOKEN`: HA Long‑Lived Access Token (read‑only)
   - `POLL_INTERVAL`: seconds between polls (default 2.0)
+  - `INPUT_SOURCE`: source for phase values. Supported: `home_assistant` (default) or `shelly_webapi`
   - `HA_SMOOTHING_ENABLE`: when `true`, average each sensor reading over the last 5 values
   - Entity IDs (override as needed): `A_POWER`, `B_POWER`, `C_POWER`, `A_VOLT`, `B_VOLT`, `C_VOLT`, `A_CURR`, `B_CURR`, `C_CURR`, `A_PF`, `B_PF`, `C_PF`
+  - Shelly upstream source (used when `INPUT_SOURCE=shelly_webapi`)
+    - `SHELLY_BASE_URL`: base URL of one upstream Shelly (for example `http://192.168.1.120`)
+    - `SHELLY_BASE_URLS`: comma-separated list of Shelly base URLs to aggregate (takes precedence over `SHELLY_BASE_URL`)
+    - `SHELLY_TIMEOUT`: HTTP timeout in seconds for Shelly requests (default `3.0`)
 - Device identity
   - `DEVICE_ID`: Device identifier reported in RPC/mDNS (default `shellypro3em-virtual-001`)
   - `APP_ID`: Shelly application identifier (default `shellypro3em`)
@@ -123,6 +128,13 @@ Home Assistant polling
 
 - Each `POLL_INTERVAL`, HA sensors are fetched. Missing or `unknown/unavailable` values are treated as `None` (or `0.0` for power). Phase power values feed energy integration (kWh) over time.
 - Energy counters persist to `STATE_PATH`. You can reset counters via RPC: `EMData.ResetCounters`.
+
+Shelly Web API polling
+
+- When `INPUT_SOURCE=shelly_webapi`, each poll fetches `EM.GetStatus` from one or more configured Shelly devices using HTTP endpoints (`/rpc/EM.GetStatus?id=0`, fallback `/rpc?method=EM.GetStatus&id=0`).
+- For multiple devices (`SHELLY_BASE_URLS`), per-phase values are aggregated:
+  - `a/b/c_act_power` and `a/b/c_current`: summed across Shelly devices.
+  - `a/b/c_voltage` and `a/b/c_pf`: averaged across Shelly devices that returned values.
 
 Shelly app notes
 
