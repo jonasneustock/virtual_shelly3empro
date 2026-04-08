@@ -47,6 +47,15 @@ HA_TOKEN = os.getenv("HA_TOKEN", "")
 POLL_INTERVAL = float(os.getenv("POLL_INTERVAL", "2.0"))
 HA_SMOOTHING_ENABLE = os.getenv("HA_SMOOTHING_ENABLE", "false").lower() in ("1", "true", "yes")
 HA_SMOOTHING_WINDOW = 5
+INPUT_SOURCE = os.getenv("INPUT_SOURCE", "home_assistant").strip().lower()
+
+SHELLY_BASE_URL = os.getenv("SHELLY_BASE_URL", "").strip().rstrip("/")
+SHELLY_BASE_URLS = [
+    u.strip().rstrip("/")
+    for u in os.getenv("SHELLY_BASE_URLS", "").split(",")
+    if u.strip()
+]
+SHELLY_TIMEOUT = float(os.getenv("SHELLY_TIMEOUT", "3.0"))
 
 A_POWER = os.getenv("A_POWER", "sensor.phase_a_power")
 B_POWER = os.getenv("B_POWER", "sensor.phase_b_power")
@@ -139,6 +148,83 @@ def ha_get(entity_id: str) -> Optional[float]:
         return value
     except Exception:
         return None
+
+
+def _coerce_float(value: Any) -> Optional[float]:
+    if value in (None, "unknown", "unavailable", ""):
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _shelly_sources() -> List[str]:
+    if SHELLY_BASE_URLS:
+        return SHELLY_BASE_URLS
+    if SHELLY_BASE_URL:
+        return [SHELLY_BASE_URL]
+    return []
+
+
+def shelly_get_em_status(base_url: str) -> Optional[Dict[str, Any]]:
+    if not base_url:
+        return None
+    headers = {"Content-Type": "application/json"}
+    urls = [
+        f"{base_url}/rpc/EM.GetStatus?id=0",
+        f"{base_url}/rpc?method=EM.GetStatus&id=0",
+    ]
+    for url in urls:
+        try:
+            r = requests.get(url, headers=headers, timeout=SHELLY_TIMEOUT)
+            if r.status_code != 200:
+                continue
+            data = r.json()
+            if isinstance(data, dict):
+                # Support direct result and JSON-RPC envelope
+                if "result" in data and isinstance(data["result"], dict):
+                    return data["result"]
+                return data
+        except Exception:
+            continue
+    return None
+
+
+def shelly_get_em_status_aggregated() -> Dict[str, float]:
+    totals: Dict[str, float] = {
+        "a_act_power": 0.0,
+        "b_act_power": 0.0,
+        "c_act_power": 0.0,
+        "a_voltage": 0.0,
+        "b_voltage": 0.0,
+        "c_voltage": 0.0,
+        "a_current": 0.0,
+        "b_current": 0.0,
+        "c_current": 0.0,
+        "a_pf": 0.0,
+        "b_pf": 0.0,
+        "c_pf": 0.0,
+    }
+    contributors = {k: 0 for k in totals}
+
+    for source in _shelly_sources():
+        status = shelly_get_em_status(source)
+        if not status:
+            continue
+        for key in totals:
+            value = _coerce_float(status.get(key))
+            if value is None:
+                continue
+            totals[key] += value
+            contributors[key] += 1
+
+    # Keep voltages and power factors realistic when aggregating multiple meters:
+    # use average for V/PF, sum for powers/currents.
+    for key in ("a_voltage", "b_voltage", "c_voltage", "a_pf", "b_pf", "c_pf"):
+        if contributors[key] > 0:
+            totals[key] = totals[key] / contributors[key]
+    return totals
 
 
 _SMOOTHING_LOCK = threading.RLock()
@@ -291,18 +377,36 @@ class VirtualPro3EM:
 
     def poll_home_assistant(self):
         try:
-            a_w = ha_get(A_POWER) or 0.0
-            b_w = ha_get(B_POWER) or 0.0
-            c_w = ha_get(C_POWER) or 0.0
-            a_volt = ha_get(A_VOLT)
-            b_volt = ha_get(B_VOLT)
-            c_volt = ha_get(C_VOLT)
-            a_curr = ha_get(A_CURR)
-            b_curr = ha_get(B_CURR)
-            c_curr = ha_get(C_CURR)
-            a_pf = ha_get(A_PF) or None
-            b_pf = ha_get(B_PF) or None
-            c_pf = ha_get(C_PF) or None
+            if INPUT_SOURCE == "shelly_webapi":
+                status = shelly_get_em_status_aggregated()
+                a_w = _coerce_float(status.get("a_act_power")) or 0.0
+                b_w = _coerce_float(status.get("b_act_power")) or 0.0
+                c_w = _coerce_float(status.get("c_act_power")) or 0.0
+
+                a_volt = _coerce_float(status.get("a_voltage"))
+                b_volt = _coerce_float(status.get("b_voltage"))
+                c_volt = _coerce_float(status.get("c_voltage"))
+
+                a_curr = _coerce_float(status.get("a_current"))
+                b_curr = _coerce_float(status.get("b_current"))
+                c_curr = _coerce_float(status.get("c_current"))
+
+                a_pf = _coerce_float(status.get("a_pf")) or None
+                b_pf = _coerce_float(status.get("b_pf")) or None
+                c_pf = _coerce_float(status.get("c_pf")) or None
+            else:
+                a_w = ha_get(A_POWER) or 0.0
+                b_w = ha_get(B_POWER) or 0.0
+                c_w = ha_get(C_POWER) or 0.0
+                a_volt = ha_get(A_VOLT)
+                b_volt = ha_get(B_VOLT)
+                c_volt = ha_get(C_VOLT)
+                a_curr = ha_get(A_CURR)
+                b_curr = ha_get(B_CURR)
+                c_curr = ha_get(C_CURR)
+                a_pf = ha_get(A_PF) or None
+                b_pf = ha_get(B_PF) or None
+                c_pf = ha_get(C_PF) or None
             with self.lock:
                 self.phases["a"].act_power = float(a_w)
                 self.phases["b"].act_power = float(b_w)
