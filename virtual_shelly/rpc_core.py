@@ -75,6 +75,13 @@ def _udp_decimal_enforcer(power: float) -> float:
     add = decimal_point_enforcer if (p == round(p) or p == 0) else 0.0
     return round(p + add, 1)
 
+def _apply_total_power_offset(total_power: float) -> float:
+    if total_power > 0:
+        return total_power - 200.0
+    if total_power < 0:
+        return total_power - 50.0
+    return total_power
+
 
 def udp_build_response(vm, device_id: str, obj: Dict[str, Any]) -> Dict[str, Any] | None:
     # Implement Shelly-like UDP RPC used by b2500-meter (not JSON-RPC 2.0)
@@ -97,7 +104,7 @@ def udp_build_response(vm, device_id: str, obj: Dict[str, Any]) -> Dict[str, Any
         a = _udp_decimal_enforcer(powers[0])
         b = _udp_decimal_enforcer(powers[1])
         c = _udp_decimal_enforcer(powers[2])
-        total = round(sum(powers), 3)
+        total = round(_apply_total_power_offset(sum(powers)), 3)
         if total == round(total) or total == 0:
             total = total + 0.001
         return {
@@ -118,7 +125,7 @@ def udp_build_response(vm, device_id: str, obj: Dict[str, Any]) -> Dict[str, Any
                 vm.phases["b"].act_power or 0.0,
                 vm.phases["c"].act_power or 0.0,
             ]
-        total = round(sum(powers), 3)
+        total = round(_apply_total_power_offset(sum(powers)), 3)
         if total == round(total) or total == 0:
             total = total + 0.001
         return {
@@ -130,4 +137,3 @@ def udp_build_response(vm, device_id: str, obj: Dict[str, Any]) -> Dict[str, Any
     else:
         # Unknown methods: silently ignore (b2500-meter behavior)
         return None
-
