@@ -364,6 +364,13 @@ def _apply_request_side_power_scaling(powers: Tuple[float, float, float]) -> Tup
         return powers
     return tuple(p / count for p in powers)
 
+def _apply_total_power_offset(total_power: float) -> float:
+    if total_power > 0:
+        return total_power - 200.0
+    if total_power < 0:
+        return total_power - 50.0
+    return total_power
+
 
 def _smooth_value(entity_id: str, value: float) -> float:
     with _SMOOTHING_LOCK:
@@ -541,7 +548,7 @@ class VirtualPro3EM:
                 float(c.act_power or 0.0),
             )
             a_power, b_power, c_power = _apply_request_side_power_scaling(raw_powers)
-            total_w = a_power + b_power + c_power
+            total_w = _apply_total_power_offset(a_power + b_power + c_power)
 
             if STRICT_MINIMAL_PAYLOAD:
                 # Minimal contract: only the 4 power keys some gateways require
@@ -769,7 +776,7 @@ if StartAsyncTcpServer is not None:
                 float(phases["c"].act_power or 0.0),
             )
             a_power, b_power, c_power = _apply_request_side_power_scaling(raw_powers)
-            total_power = a_power + b_power + c_power
+            total_power = _apply_total_power_offset(a_power + b_power + c_power)
             self._write_pair(regs, 3020, _pack_register_pair(a_power, ">f"))
             self._write_pair(regs, 3022, _pack_register_pair(b_power, ">f"))
             self._write_pair(regs, 3024, _pack_register_pair(c_power, ">f"))
@@ -1690,7 +1697,7 @@ def _udp_build_response(obj: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         a = _udp_decimal_enforcer(scaled[0])
         b = _udp_decimal_enforcer(scaled[1])
         c = _udp_decimal_enforcer(scaled[2])
-        total = round(sum(scaled), 3)
+        total = round(_apply_total_power_offset(sum(scaled)), 3)
         if total == round(total) or total == 0:
             total = total + 0.001
         return {
@@ -1712,7 +1719,7 @@ def _udp_build_response(obj: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 float(VM.phases["c"].act_power or 0.0),
             )
         scaled = _apply_request_side_power_scaling(raw_powers)
-        total = round(sum(scaled), 3)
+        total = round(_apply_total_power_offset(sum(scaled)), 3)
         if total == round(total) or total == 0:
             total = total + 0.001
         return {
