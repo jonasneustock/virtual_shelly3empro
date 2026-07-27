@@ -368,7 +368,7 @@ def _apply_total_power_offset(total_power: float) -> float:
     if total_power > 0:
         return total_power - 50.0
     if total_power < 0:
-        return total_power - 150.0
+        return total_power - 25.0
     return total_power
 
 
