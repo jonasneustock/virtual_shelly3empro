@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from typing import Dict, Any, Callable
 
+from virtual_shelly.power import apply_total_power_offset as _apply_total_power_offset
+
 
 def build_methods(vm) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
     methods = {
@@ -74,14 +76,6 @@ def _udp_decimal_enforcer(power: float) -> float:
         return decimal_point_enforcer
     add = decimal_point_enforcer if (p == round(p) or p == 0) else 0.0
     return round(p + add, 1)
-
-def _apply_total_power_offset(total_power: float) -> float:
-    if total_power > 0:
-        return total_power - 200.0
-    if total_power < 0:
-        return total_power - 50.0
-    return total_power
-
 
 def udp_build_response(vm, device_id: str, obj: Dict[str, Any]) -> Dict[str, Any] | None:
     # Implement Shelly-like UDP RPC used by b2500-meter (not JSON-RPC 2.0)

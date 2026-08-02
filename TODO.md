@@ -48,7 +48,7 @@ Documentation
 
 Docker & CI
 
-- [ ] Multi‑arch images and GHCR publish workflow (GitHub Actions).
+- [x] Multi‑arch images and GHCR publish workflow (GitHub Actions).
 - [ ] Optionally expose timezone/env configuration and log formatting flags.
 
 Known Limitations (to revisit)
