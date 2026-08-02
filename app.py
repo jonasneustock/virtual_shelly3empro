@@ -366,9 +366,9 @@ def _apply_request_side_power_scaling(powers: Tuple[float, float, float]) -> Tup
 
 def _apply_total_power_offset(total_power: float) -> float:
     if total_power > 0:
-        return total_power - 50.0
+        return total_power - 10.0 #TODO: env var
     if total_power < 0:
-        return total_power - 25.0
+        return total_power - 10.0 #TODO: env var
     return total_power
 
 
