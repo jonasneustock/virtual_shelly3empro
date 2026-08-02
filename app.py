@@ -19,6 +19,7 @@ from virtual_shelly import metrics as MET
 from virtual_shelly import ui as UI
 from virtual_shelly import rpc_core as RPC
 from virtual_shelly import udp_server as UDP
+from virtual_shelly.power import apply_total_power_offset as _apply_total_power_offset
 
 # mDNS
 from zeroconf import Zeroconf, ServiceInfo, InterfaceChoice
@@ -363,14 +364,6 @@ def _apply_request_side_power_scaling(powers: Tuple[float, float, float]) -> Tup
     if count <= 1:
         return powers
     return tuple(p / count for p in powers)
-
-def _apply_total_power_offset(total_power: float) -> float:
-    if total_power > 0:
-        return total_power - 10.0 #TODO: env var
-    if total_power < 0:
-        return total_power - 10.0 #TODO: env var
-    return total_power
-
 
 def _smooth_value(entity_id: str, value: float) -> float:
     with _SMOOTHING_LOCK:

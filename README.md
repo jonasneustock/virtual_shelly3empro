@@ -78,6 +78,10 @@ Configuration (env vars)
   - Request‑side scaling (divide power by active client IPs)
     - `REQUEST_SIDE_SCALING_ENABLE`: `true|false` (default `true`)
     - `REQUEST_SIDE_SCALING_CLIENTS`: integer override for client count (default `0` = auto by active IPs)
+  - Total power offsets
+    - `POSITIVE_POWER_OFFSET`: watts subtracted when total power is positive (default `10.0`)
+    - `NEGATIVE_POWER_OFFSET`: watts subtracted when total power is negative (default `10.0`)
+    - An exact zero total is left unchanged.
 - UDP RPC
   - `UDP_PORTS`: comma‑separated list (e.g. `1010,2220`) for old/new Shelly Pro 3EM styles
   - `UDP_MAX`: max UDP payload size (bytes)
