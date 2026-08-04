@@ -10,6 +10,10 @@ services:
       HA_BASE_URL: "http://192.168.2.225:8123"
       HA_TOKEN: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiI0M2M0MTdlYTk1NmE0YjRhOTkxMWE2ZmZiMDBkM2NhZiIsImlhdCI6MTc1OTE2NzUyOCwiZXhwIjoyMDc0NTI3NTI4fQ.e1sJ6xlkH4YgM9ld3L00Ztsi_g3xQ-dLggEOLXeRDaM"
       POLL_INTERVAL: "2.0"
+      FORECAST_ENABLE: "true"
+      FORECAST_HORIZON_STEPS: "1"
+      FORECAST_TRAIN_HOUR: "2"
+      FORECAST_MIN_SAMPLES: "1000"
       # Total power correction in watts, selected by the raw total's sign.
       POSITIVE_POWER_OFFSET: "10.0"
       NEGATIVE_POWER_OFFSET: "10.0"

@@ -26,6 +26,7 @@ Features
   - Defaults to TCP port 502 with unit ID 1 (configurable via env vars).
 - mDNS service advertisements (`_http._tcp` and `_shelly._tcp`) for discovery.
 - Energy counters integrated from power over time and persisted at `/data/state.json` (via Docker volume).
+ - LightGBM forecasts replace phase and total power in Shelly responses. Raw readings are retained for energy integration, while the dashboard reports validation MAPE and model status.
  - Simple `/metrics` endpoint with Prometheus‑style counters for HTTP/WS/UDP events.
 
 Quick Start (Docker Compose)
@@ -98,6 +99,17 @@ Configuration (env vars)
   - `STRICT_MINIMAL_PAYLOAD`: when `true`, HTTP/WS `EM.GetStatus` returns only `{a_act_power,b_act_power,c_act_power,total_act_power}` (some gateways prefer this).
 - Persistence
   - `STATE_PATH`: defaults to `/data/state.json` (mounted via volume in Compose).
+- Forecasting
+  - `FORECAST_ENABLE`: enable history collection and forecasts (default `true`). Until a model is available, current readings are returned.
+  - `FORECAST_HORIZON_STEPS`: number of polling steps ahead to predict (default `1`; a step is `POLL_INTERVAL`). Changing it invalidates the active model and triggers a complete cold retrain for the new target window.
+  - `FORECAST_HISTORY_PATH`: SQLite observation store (default `/data/power_history.sqlite3`).
+  - `FORECAST_MODEL_DIR`: promoted LightGBM models and metrics (default `/data/forecast_model`).
+  - `FORECAST_TRAIN_HOUR`: local hour for daily child-process training (default `2`).
+  - `FORECAST_MIN_SAMPLES`: minimum supervised samples required to train (default `1000`).
+  - `FORECAST_VALIDATION_FRACTION`: newest chronological fraction used for validation (default `0.2`).
+  - `FORECAST_HISTORY_DAYS`: observation retention period (default `30`).
+  - `FORECAST_MAPE_FLOOR_WATTS`: denominator floor used by MAPE around zero (default `10`).
+  - Daily training warm-starts each phase model from the active LightGBM booster. A candidate is atomically promoted only when its mean phase validation MAPE beats the incumbent on the same validation slice.
 
 APIs
 

@@ -20,6 +20,7 @@ from virtual_shelly import ui as UI
 from virtual_shelly import rpc_core as RPC
 from virtual_shelly import udp_server as UDP
 from virtual_shelly.power import apply_total_power_offset as _apply_total_power_offset
+from virtual_shelly.forecast import ForecastConfig, ForecastManager
 
 # mDNS
 from zeroconf import Zeroconf, ServiceInfo, InterfaceChoice
@@ -512,6 +513,8 @@ class VirtualPro3EM:
                 self.phases["b"].pf = b_pf
                 self.phases["c"].pf = c_pf
 
+            FORECAST.record((float(a_w), float(b_w), float(c_w)))
+
             # Integrate using monotonic time to avoid wall clock jumps
             now_mono = time.monotonic()
             if self.last_poll_mono is not None:
@@ -528,6 +531,13 @@ class VirtualPro3EM:
             pass
 
     # ---------- RPC builders ----------
+    def forecast_powers(self) -> Tuple[float, float, float]:
+        """Return N+X phase predictions, or actual readings during cold start."""
+        with self.lock:
+            actual = tuple(float(self.phases[p].act_power or 0.0) for p in ("a", "b", "c"))
+        predicted, _ = FORECAST.predict(actual)
+        return predicted
+
     def em_get_status(self, params: Dict[str, Any]) -> Dict[str, Any]:
         # Validate channel id; Shelly 3EM uses id=0
         chan = params.get("id", 0)
@@ -535,11 +545,7 @@ class VirtualPro3EM:
             raise ValueError("invalid id")
         with self.lock:
             a, b, c = self.phases["a"], self.phases["b"], self.phases["c"]
-            raw_powers = (
-                float(a.act_power or 0.0),
-                float(b.act_power or 0.0),
-                float(c.act_power or 0.0),
-            )
+            raw_powers = self.forecast_powers()
             a_power, b_power, c_power = _apply_request_side_power_scaling(raw_powers)
             total_w = _apply_total_power_offset(a_power + b_power + c_power)
 
@@ -763,11 +769,7 @@ if StartAsyncTcpServer is not None:
             self._write_pair(regs, 3012, _pack_register_pair(phases["b"].current or 0.0, ">f"))
             self._write_pair(regs, 3014, _pack_register_pair(phases["c"].current or 0.0, ">f"))
 
-            raw_powers = (
-                float(phases["a"].act_power or 0.0),
-                float(phases["b"].act_power or 0.0),
-                float(phases["c"].act_power or 0.0),
-            )
+            raw_powers = self.vm.forecast_powers()
             a_power, b_power, c_power = _apply_request_side_power_scaling(raw_powers)
             total_power = _apply_total_power_offset(a_power + b_power + c_power)
             self._write_pair(regs, 3020, _pack_register_pair(a_power, ">f"))
@@ -970,6 +972,7 @@ log = logging.getLogger("virtual_shelly")
 
 app = FastAPI(title="Virtual Shelly Pro 3EM RPC")
 VM = VirtualPro3EM()
+FORECAST = ForecastManager(ForecastConfig.from_env(), POLL_INTERVAL)
 MODBUS_BRIDGE = None
 if MODBUS_ENABLE and StartAsyncTcpServer is not None:
     try:
@@ -1253,7 +1256,9 @@ def admin_overview():
                 pass
     except Exception:
         pass
-    return JSONResponse(MET.build_admin_overview(VM, ws_ips, now_ts))
+    overview = MET.build_admin_overview(VM, ws_ips, now_ts)
+    overview["forecast"] = FORECAST.status()
+    return JSONResponse(overview)
 
 @app.get("/")
 def root():
@@ -1262,6 +1267,7 @@ def root():
 
 @app.get("/ui")
 def ui_page():
+    """Render the single dashboard implementation from virtual_shelly.ui."""
     html = """
 <!doctype html>
 <html lang=\"en\">
@@ -1485,6 +1491,7 @@ def shelly_http_info():
 def poll_loop():
     while True:
         VM.poll_home_assistant()
+        FORECAST.maybe_launch_training()
         if MODBUS_BRIDGE:
             MODBUS_BRIDGE.update()
         # Throttled WS notify broadcast
@@ -1680,12 +1687,7 @@ def _udp_build_response(obj: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return None
 
     if method == "EM.GetStatus":
-        with VM.lock:
-            raw_powers = (
-                float(VM.phases["a"].act_power or 0.0),
-                float(VM.phases["b"].act_power or 0.0),
-                float(VM.phases["c"].act_power or 0.0),
-            )
+        raw_powers = VM.forecast_powers()
         scaled = _apply_request_side_power_scaling(raw_powers)
         a = _udp_decimal_enforcer(scaled[0])
         b = _udp_decimal_enforcer(scaled[1])
@@ -1705,12 +1707,7 @@ def _udp_build_response(obj: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             },
         }
     elif method == "EM1.GetStatus":
-        with VM.lock:
-            raw_powers = (
-                float(VM.phases["a"].act_power or 0.0),
-                float(VM.phases["b"].act_power or 0.0),
-                float(VM.phases["c"].act_power or 0.0),
-            )
+        raw_powers = VM.forecast_powers()
         scaled = _apply_request_side_power_scaling(raw_powers)
         total = round(_apply_total_power_offset(sum(scaled)), 3)
         if total == round(total) or total == 0:

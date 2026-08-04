@@ -89,12 +89,7 @@ def udp_build_response(vm, device_id: str, obj: Dict[str, Any]) -> Dict[str, Any
         return None
 
     if method == "EM.GetStatus":
-        with vm.lock:
-            powers = [
-                vm.phases["a"].act_power or 0.0,
-                vm.phases["b"].act_power or 0.0,
-                vm.phases["c"].act_power or 0.0,
-            ]
+        powers = vm.forecast_powers()
         a = _udp_decimal_enforcer(powers[0])
         b = _udp_decimal_enforcer(powers[1])
         c = _udp_decimal_enforcer(powers[2])
@@ -113,12 +108,7 @@ def udp_build_response(vm, device_id: str, obj: Dict[str, Any]) -> Dict[str, Any
             },
         }
     elif method == "EM1.GetStatus":
-        with vm.lock:
-            powers = [
-                vm.phases["a"].act_power or 0.0,
-                vm.phases["b"].act_power or 0.0,
-                vm.phases["c"].act_power or 0.0,
-            ]
+        powers = vm.forecast_powers()
         total = round(_apply_total_power_offset(sum(powers)), 3)
         if total == round(total) or total == 0:
             total = total + 0.001
