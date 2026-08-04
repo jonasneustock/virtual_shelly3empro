@@ -11,6 +11,9 @@ def dashboard_html() -> str:
   <style>
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 16px; color: #0b0b0b; }
     h1 { font-size: 20px; margin: 0 0 12px 0; }
+    .header { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; }
+    .forecast { min-width:230px; background:#f6f8fa; border:1px solid #d8dee4; border-radius:8px; padding:10px 12px; }
+    .forecast strong { font-size:18px; display:block; }
     h2 { font-size: 16px; margin: 18px 0 10px 0; }
     .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
     .card { border: 1px solid #e2e2e2; border-radius: 8px; padding: 12px; }
@@ -41,6 +44,10 @@ def dashboard_html() -> str:
       const dev = d.device || {};
       document.getElementById('device').textContent = (dev.id || 'device') + ' (' + (dev.model || '') + ' ' + (dev.ver || '') + ')';
       document.getElementById('updated').textContent = new Date(d.ts * 1000).toLocaleString();
+      const forecast = d.forecast || {};
+      document.getElementById('forecast-mape').textContent = forecast.validation_mape == null ? 'MAPE unavailable' : `MAPE ${fmt(forecast.validation_mape)}%`;
+      document.getElementById('forecast-detail').textContent = `${forecast.serving || 'fallback_actual'} · N+${forecast.horizon_steps || '-'} (${fmt(forecast.horizon_seconds, 0)}s)`;
+      document.getElementById('forecast-trained').textContent = forecast.trained_at ? `Trained ${new Date(forecast.trained_at).toLocaleString()}` : 'Collecting training data';
 
       const em = (d.values && d.values.em) || {};
       const emdata = (d.values && d.values.emdata) || {};
@@ -116,8 +123,10 @@ def dashboard_html() -> str:
   </script>
 </head>
 <body>
-  <h1>Virtual Shelly 3EM Pro — Status <span class="muted" id="device"></span></h1>
-  <div class="muted">Updated: <span id="updated">-</span></div>
+  <div class="header">
+    <div><h1>Virtual Shelly 3EM Pro — Status <span class="muted" id="device"></span></h1><div class="muted">Updated: <span id="updated">-</span></div></div>
+    <div class="forecast"><strong id="forecast-mape">MAPE unavailable</strong><div id="forecast-detail" class="muted">Loading forecast status</div><div id="forecast-trained" class="muted"></div></div>
+  </div>
 
   <div class="grid">
     <div class="card">
@@ -186,4 +195,3 @@ def dashboard_html() -> str:
 </body>
 </html>
 """
-
