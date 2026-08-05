@@ -171,9 +171,36 @@ class ForecastManager:
         except Exception:
             return tuple(map(float, actual)), False
 
+    def sample_counts(self) -> Tuple[int, int]:
+        if not self.store:
+            return 0, 0
+        try:
+            total = len(supervised(self.store.read(), self.config.horizon)[0])
+        except Exception:
+            return 0, 0
+        if total < 2:
+            return total, 0
+        train = max(1, min(total - 1, int(total * (1 - self.config.validation_fraction))))
+        return train, total - train
+
+    def _reap_process(self) -> None:
+        if self.process is not None and self.process.poll() is not None:
+            self.process = None
+
+    def launch_training(self) -> bool:
+        if not self.config.enabled:
+            return False
+        self._reap_process()
+        if self.process is not None:
+            return False
+        self.process = subprocess.Popen([sys.executable, "-m", "virtual_shelly.train_forecast"])
+        return True
+
     def status(self) -> Dict[str, Any]:
         self.reload()
+        self._reap_process()
         running = self.process is not None and self.process.poll() is None
+        training_samples, current_validation_samples = self.sample_counts()
         return {
             "enabled": self.config.enabled,
             "available": bool(self.models),
@@ -182,9 +209,13 @@ class ForecastManager:
             "horizon_seconds": self.config.horizon * self.poll_interval,
             "validation_mape": self.metadata.get("validation_mape"),
             "phase_mape": self.metadata.get("phase_mape", {}),
+            "training_samples": training_samples,
             "validation_samples": self.metadata.get("validation_samples"),
+            "current_validation_samples": current_validation_samples,
+            "min_samples": self.config.min_samples,
             "trained_at": self.metadata.get("trained_at"),
             "training": running,
+            "training_status": "running" if running else ("ready" if training_samples + current_validation_samples >= self.config.min_samples else "collecting_data"),
         }
 
     def maybe_launch_training(self, now: Optional[datetime] = None) -> None:
@@ -192,8 +223,6 @@ class ForecastManager:
             return
         now = now or datetime.now()
         today = now.date().isoformat()
-        if self.process is not None and self.process.poll() is not None:
-            self.process = None
-        if now.hour == self.config.train_hour and self.last_launch_date != today and self.process is None:
-            self.process = subprocess.Popen([sys.executable, "-m", "virtual_shelly.train_forecast"])
+        self._reap_process()
+        if now.hour == self.config.train_hour and self.last_launch_date != today and self.launch_training():
             self.last_launch_date = today

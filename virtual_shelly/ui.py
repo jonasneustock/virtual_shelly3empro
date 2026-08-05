@@ -14,6 +14,8 @@ def dashboard_html() -> str:
     .header { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; }
     .forecast { min-width:230px; background:#f6f8fa; border:1px solid #d8dee4; border-radius:8px; padding:10px 12px; }
     .forecast strong { font-size:18px; display:block; }
+    .forecast button { margin-top:8px; padding:6px 10px; border:1px solid #0969da; border-radius:6px; background:#0969da; color:white; cursor:pointer; }
+    .forecast button:disabled { background:#8c959f; border-color:#8c959f; cursor:not-allowed; }
     h2 { font-size: 16px; margin: 18px 0 10px 0; }
     .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
     .card { border: 1px solid #e2e2e2; border-radius: 8px; padding: 12px; }
@@ -40,6 +42,21 @@ def dashboard_html() -> str:
       return String(n);
     }
 
+    async function startTraining() {
+      const button = document.getElementById('forecast-train');
+      button.disabled = true;
+      button.textContent = 'Starting…';
+      try {
+        const res = await fetch('/admin/forecast/train', {method: 'POST'});
+        await res.json();
+        await fetchOverview();
+      } catch (e) {
+        console.error('Training start error', e);
+        button.disabled = false;
+        button.textContent = 'Start training';
+      }
+    }
+
     function render(d) {
       const dev = d.device || {};
       document.getElementById('device').textContent = (dev.id || 'device') + ' (' + (dev.model || '') + ' ' + (dev.ver || '') + ')';
@@ -47,7 +64,16 @@ def dashboard_html() -> str:
       const forecast = d.forecast || {};
       document.getElementById('forecast-mape').textContent = forecast.validation_mape == null ? 'MAPE unavailable' : `MAPE ${fmt(forecast.validation_mape)}%`;
       document.getElementById('forecast-detail').textContent = `${forecast.serving || 'fallback_actual'} · N+${forecast.horizon_steps || '-'} (${fmt(forecast.horizon_seconds, 0)}s)`;
-      document.getElementById('forecast-trained').textContent = forecast.trained_at ? `Trained ${new Date(forecast.trained_at).toLocaleString()}` : 'Collecting training data';
+      const training = Boolean(forecast.training);
+      const status = forecast.training_status || (training ? 'running' : 'idle');
+      const trainSamples = forecast.training_samples ?? 0;
+      const validationSamples = forecast.current_validation_samples ?? forecast.validation_samples ?? 0;
+      const minSamples = forecast.min_samples ?? '-';
+      document.getElementById('forecast-trained').textContent = forecast.trained_at ? `Trained ${new Date(forecast.trained_at).toLocaleString()}` : 'No trained model yet';
+      document.getElementById('forecast-status').textContent = `Status ${status.replace('_', ' ')} · train ${trainSamples} / validation ${validationSamples} samples · min ${minSamples}`;
+      const trainButton = document.getElementById('forecast-train');
+      trainButton.disabled = training || forecast.enabled === false;
+      trainButton.textContent = training ? 'Training…' : 'Start training';
 
       const em = (d.values && d.values.em) || {};
       const emdata = (d.values && d.values.emdata) || {};
@@ -125,7 +151,7 @@ def dashboard_html() -> str:
 <body>
   <div class="header">
     <div><h1>Virtual Shelly 3EM Pro — Status <span class="muted" id="device"></span></h1><div class="muted">Updated: <span id="updated">-</span></div></div>
-    <div class="forecast"><strong id="forecast-mape">MAPE unavailable</strong><div id="forecast-detail" class="muted">Loading forecast status</div><div id="forecast-trained" class="muted"></div></div>
+    <div class="forecast"><strong id="forecast-mape">MAPE unavailable</strong><div id="forecast-detail" class="muted">Loading forecast status</div><div id="forecast-status" class="muted">Status unknown</div><div id="forecast-trained" class="muted"></div><button id="forecast-train" type="button" onclick="startTraining()">Start training</button></div>
   </div>
 
   <div class="grid">
