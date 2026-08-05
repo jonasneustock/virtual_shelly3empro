@@ -43,6 +43,7 @@ Quick Start (Docker Compose)
 Manual Run (no Docker)
 
 - Python 3.11+
+- LightGBM requires the OpenMP runtime (`libgomp.so.1` on Linux; e.g. install `libgomp1` on Debian/Ubuntu).
 - `pip install -r requirements.txt`
 - `uvicorn app:app --host 0.0.0.0 --port 80`
 
