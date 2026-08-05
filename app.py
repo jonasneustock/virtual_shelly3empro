@@ -1240,6 +1240,12 @@ def metrics():
     return PlainTextResponse(MET.metrics_text(len(WS_RPC_CLIENTS)))
 
 
+@app.post("/admin/forecast/train")
+def admin_forecast_train():
+    started = FORECAST.launch_training()
+    status = FORECAST.status()
+    return JSONResponse({"started": started, "forecast": status})
+
 @app.get("/admin/overview")
 def admin_overview():
     # WS connected IPs (best-effort)
