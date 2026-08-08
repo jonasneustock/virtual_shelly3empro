@@ -25,7 +25,7 @@ Features
   - Read-only input/holding registers share the same data; writing `1` to holding register `4200` resets the virtual energy counters.
   - Defaults to TCP port 502 with unit ID 1 (configurable via env vars).
 - mDNS service advertisements (`_http._tcp` and `_shelly._tcp`) for discovery.
-- Energy counters integrated from power over time and persisted at `/data/state.json` (via Docker volume).
+- Energy counters integrated from power over time and persisted hourly at `/data/state.json` (via Docker volume).
  - LightGBM forecasts replace phase and total power in Shelly responses. Raw readings are retained for energy integration, while the dashboard reports validation MAPE and model status.
  - Simple `/metrics` endpoint with Prometheus‑style counters for HTTP/WS/UDP events.
 
@@ -100,10 +100,11 @@ Configuration (env vars)
   - `STRICT_MINIMAL_PAYLOAD`: when `true`, HTTP/WS `EM.GetStatus` returns only `{a_act_power,b_act_power,c_act_power,total_act_power}` (some gateways prefer this).
 - Persistence
   - `STATE_PATH`: defaults to `/data/state.json` (mounted via volume in Compose).
+  - Energy state and forecast observations are buffered in memory and flushed to disk once every 60 minutes to limit disk churn. A shutdown between flushes can therefore lose up to one hour of new data.
 - Forecasting
   - `FORECAST_ENABLE`: enable history collection and forecasts (default `true`). Until a model is available, current readings are returned.
   - `FORECAST_HORIZON_STEPS`: number of polling steps ahead to predict (default `1`; a step is `POLL_INTERVAL`). Changing it invalidates the active model and triggers a complete cold retrain for the new target window.
-  - `FORECAST_HISTORY_PATH`: SQLite observation store (default `/data/power_history.sqlite3`).
+  - `FORECAST_HISTORY_PATH`: SQLite observation store (default `/data/power_history.sqlite3`); new observations are written in hourly batches.
   - `FORECAST_MODEL_DIR`: promoted LightGBM models and metrics (default `/data/forecast_model`).
   - `FORECAST_TRAIN_HOUR`: local hour for daily child-process training (default `2`).
   - `FORECAST_MIN_SAMPLES`: minimum supervised samples required to train (default `1000`).

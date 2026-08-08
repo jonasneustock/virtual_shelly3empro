@@ -67,6 +67,18 @@ class ForecastTests(unittest.TestCase):
             store.append(1, (1, 2, 3))
             self.assertEqual([row[0] for row in store.read()], [1.0, 2.0])
             self.assertEqual([row[0] for row in store.read(cutoff=1.5)], [2.0])
+            self.assertEqual(HistoryStore(str(Path(tmp) / "history.db")).read(), [])
+            store.flush()
+            self.assertEqual([row[0] for row in HistoryStore(str(Path(tmp) / "history.db")).read()], [1.0, 2.0])
+
+    def test_history_flushes_buffer_after_sixty_minutes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = HistoryStore(str(Path(tmp) / "history.db"))
+            store.append(1, (1, 2, 3))
+            with patch("virtual_shelly.forecast.time.monotonic", return_value=store.last_flush_mono + 3600):
+                store.append(2, (4, 5, 6))
+            reopened = HistoryStore(str(Path(tmp) / "history.db"))
+            self.assertEqual([row[0] for row in reopened.read()], [1.0, 2.0])
 
     def test_manager_falls_back_without_a_model(self):
         with tempfile.TemporaryDirectory() as tmp:

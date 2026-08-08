@@ -18,6 +18,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 PHASES = ("a", "b", "c")
 DEFAULT_WINDOW_SIZE = 5
+DISK_FLUSH_INTERVAL_SECONDS = 60 * 60
 # Kept as a compatibility alias for callers that used the old maximum lag.
 LAGS = tuple(range(1, DEFAULT_WINDOW_SIZE + 1))
 
@@ -64,6 +65,9 @@ def mape(actual: Sequence[float], predicted: Sequence[float], floor: float = 10.
 class HistoryStore:
     def __init__(self, path: str):
         self.path = path
+        self.lock = threading.RLock()
+        self.pending: Dict[float, Tuple[float, float, float]] = {}
+        self.last_flush_mono = time.monotonic()
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as db:
             db.execute("CREATE TABLE IF NOT EXISTS power (ts REAL PRIMARY KEY, a REAL, b REAL, c REAL)")
@@ -71,19 +75,56 @@ class HistoryStore:
     def _connect(self):
         return sqlite3.connect(self.path, timeout=10)
 
-    def append(self, ts: float, powers: Sequence[float]) -> None:
-        with self._connect() as db:
-            db.execute("INSERT OR REPLACE INTO power VALUES (?, ?, ?, ?)", (ts, *map(float, powers)))
+    def append(
+        self, ts: float, powers: Sequence[float], prune_before: Optional[float] = None
+    ) -> None:
+        values = tuple(map(float, powers))
+        if len(values) != 3:
+            raise ValueError("power history requires exactly three phase values")
+        with self.lock:
+            self.pending[float(ts)] = values
+            if time.monotonic() - self.last_flush_mono >= DISK_FLUSH_INTERVAL_SECONDS:
+                self.pending = {
+                    pending_ts: pending_powers
+                    for pending_ts, pending_powers in self.pending.items()
+                    if prune_before is None or pending_ts >= prune_before
+                }
+                self.flush(prune_before=prune_before)
+
+    def flush(self, prune_before: Optional[float] = None) -> None:
+        """Commit buffered observations in one transaction at the hourly boundary."""
+        with self.lock:
+            if not self.pending and prune_before is None:
+                self.last_flush_mono = time.monotonic()
+                return
+            rows = [(ts, *powers) for ts, powers in self.pending.items()]
+            with self._connect() as db:
+                if rows:
+                    db.executemany("INSERT OR REPLACE INTO power VALUES (?, ?, ?, ?)", rows)
+                if prune_before is not None:
+                    db.execute("DELETE FROM power WHERE ts < ?", (prune_before,))
+            self.pending.clear()
+            self.last_flush_mono = time.monotonic()
 
     def read(self, cutoff: Optional[float] = None) -> List[Tuple[float, float, float, float]]:
-        with self._connect() as db:
-            if cutoff is None:
-                return list(db.execute("SELECT ts,a,b,c FROM power ORDER BY ts"))
-            return list(db.execute("SELECT ts,a,b,c FROM power WHERE ts >= ? ORDER BY ts", (cutoff,)))
+        with self.lock:
+            with self._connect() as db:
+                if cutoff is None:
+                    rows = list(db.execute("SELECT ts,a,b,c FROM power ORDER BY ts"))
+                else:
+                    rows = list(db.execute("SELECT ts,a,b,c FROM power WHERE ts >= ? ORDER BY ts", (cutoff,)))
+            merged = {row[0]: row for row in rows}
+            merged.update(
+                (ts, (ts, *powers))
+                for ts, powers in self.pending.items()
+                if cutoff is None or ts >= cutoff
+            )
+            return [merged[ts] for ts in sorted(merged)]
 
     def prune(self, cutoff: float) -> None:
-        with self._connect() as db:
-            db.execute("DELETE FROM power WHERE ts < ?", (cutoff,))
+        with self.lock:
+            self.pending = {ts: powers for ts, powers in self.pending.items() if ts >= cutoff}
+            self.flush(prune_before=cutoff)
 
 
 def feature_names(window_size: int = DEFAULT_WINDOW_SIZE) -> List[str]:
@@ -147,12 +188,15 @@ class ForecastManager:
     def record(self, powers: Sequence[float], ts: Optional[float] = None) -> None:
         if not self.store:
             return
-        self.store.append(ts or time.time(), powers)
+        now = time.time()
+        self.store.append(
+            ts or now,
+            powers,
+            prune_before=now - self.config.retention_days * 86400,
+        )
         with self.source_condition:
             self.source_generation += 1
             self.source_condition.notify_all()
-        if int(ts or time.time()) % 3600 < max(2, int(self.poll_interval)):
-            self.store.prune(time.time() - self.config.retention_days * 86400)
 
     def reload(self) -> None:
         path = self.metadata_path

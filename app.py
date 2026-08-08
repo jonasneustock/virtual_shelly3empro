@@ -6,7 +6,6 @@ import socket
 import asyncio
 import logging
 import struct
-import signal
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List, Tuple, Deque
 from collections import defaultdict, deque
@@ -92,6 +91,7 @@ MANUFACTURER = os.getenv("MANUFACTURER", "Allterco Robotics")
 GENERATION = int(os.getenv("GENERATION", "2"))
 
 STATE_PATH = os.getenv("STATE_PATH", "/data/state.json")
+DISK_FLUSH_INTERVAL_SECONDS = 60 * 60
 
 # Networking
 HTTP_PORT = int(os.getenv("HTTP_PORT", "8080"))
@@ -523,8 +523,8 @@ class VirtualPro3EM:
                     self.integrate_energy(dt)
             self.last_poll_mono = now_mono
 
-            # Persist every 30s using monotonic cadence
-            if (now_mono - self.last_persist_mono) >= 30.0:
+            # Batch disk writes on an hourly cadence to reduce storage churn.
+            if (now_mono - self.last_persist_mono) >= DISK_FLUSH_INTERVAL_SECONDS:
                 self.persist()
                 self.last_persist_mono = now_mono
         except Exception:
@@ -601,7 +601,6 @@ class VirtualPro3EM:
     def emdata_reset_counters(self, _params: Dict[str, Any]) -> Dict[str, Any]:
         with self.lock:
             self.energy = EnergyCounters(since=now_ts())
-            self.persist()
         if MODBUS_BRIDGE:
             MODBUS_BRIDGE.update()
         return {"ok": True, "ts": now_ts()}
@@ -1958,18 +1957,3 @@ def start_mdns():
     threading.Thread(target=_register, daemon=True).start()
 
 start_mdns()
-
-# -----------------------------
-# Graceful shutdown: persist energy on SIGTERM/SIGINT
-# -----------------------------
-def _handle_term(signum, frame):
-    try:
-        VM.persist()
-    except Exception:
-        pass
-
-try:
-    signal.signal(signal.SIGTERM, _handle_term)
-    signal.signal(signal.SIGINT, _handle_term)
-except Exception:
-    pass
