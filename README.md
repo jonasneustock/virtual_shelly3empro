@@ -147,6 +147,7 @@ Example Commands
 Home Assistant polling
 
 - Each `POLL_INTERVAL`, HA sensors are fetched. Missing or `unknown/unavailable` values are treated as `None` (or `0.0` for power). Phase power values feed energy integration (kWh) over time.
+- Power results are not cached across clients. After one client receives the current result, another request waits for a fresh source poll, so multiple batteries are served in round-robin order rather than reacting simultaneously to the same change.
 - Energy counters persist to `STATE_PATH`. You can reset counters via RPC: `EMData.ResetCounters`.
 
 Shelly Web API polling

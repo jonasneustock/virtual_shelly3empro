@@ -20,7 +20,6 @@ PHASES = ("a", "b", "c")
 DEFAULT_WINDOW_SIZE = 5
 # Kept as a compatibility alias for callers that used the old maximum lag.
 LAGS = tuple(range(1, DEFAULT_WINDOW_SIZE + 1))
-PREDICTION_CACHE_SECONDS = 0.5
 
 
 def _env_bool(name: str, default: str) -> bool:
@@ -132,8 +131,13 @@ class ForecastManager:
         self.metadata_mtime = 0.0
         self.process: Optional[subprocess.Popen] = None
         self.last_launch_date: Optional[str] = None
-        self.cached_prediction: Optional[Tuple[float, float, float]] = None
-        self.cached_prediction_at = 0.0
+        # A source sample may only satisfy one caller.  Serialising callers here
+        # prevents several batteries from reacting to the same rise or fall.
+        self.source_condition = threading.Condition()
+        self.source_generation = 0
+        self.served_generation = -1
+        self.next_client_ticket = 0
+        self.serving_client_ticket = 0
         self.reload()
 
     @property
@@ -144,6 +148,9 @@ class ForecastManager:
         if not self.store:
             return
         self.store.append(ts or time.time(), powers)
+        with self.source_condition:
+            self.source_generation += 1
+            self.source_condition.notify_all()
         if int(ts or time.time()) % 3600 < max(2, int(self.poll_interval)):
             self.store.prune(time.time() - self.config.retention_days * 86400)
 
@@ -165,32 +172,41 @@ class ForecastManager:
             with self.lock:
                 self.models, self.metadata = models, metadata
                 self.metadata_mtime = path.stat().st_mtime
-                self.cached_prediction = None
-                self.cached_prediction_at = 0.0
         except Exception:
             return
 
     def predict(self, actual: Sequence[float]) -> Tuple[Tuple[float, float, float], bool]:
-        self.reload()
-        if not self.store or not self.models:
+        if not self.store:
             return tuple(map(float, actual)), False
-        try:
-            import numpy as np
-            with self.lock:
-                now = time.monotonic()
-                if self.cached_prediction is not None and now - self.cached_prediction_at < PREDICTION_CACHE_SECONDS:
-                    return self.cached_prediction, True
-                rows = self.store.read()
-                if len(rows) < self.config.window_size:
+
+        # Keep the condition held through inference and generation bookkeeping:
+        # one newly recorded source value is consequently handed to one waiting
+        # client, and the following client waits for the next poll.
+        with self.source_condition:
+            ticket = self.next_client_ticket
+            self.next_client_ticket += 1
+            while ticket != self.serving_client_ticket or self.source_generation <= self.served_generation:
+                self.source_condition.wait()
+            generation = self.source_generation
+            self.reload()
+            try:
+                if not self.models:
                     return tuple(map(float, actual)), False
-                row = make_feature(rows, len(rows) - 1, self.config.window_size)
-                matrix = np.asarray([row], dtype=float)
-                result = tuple(float(self.models[p].predict(matrix)[0]) for p in PHASES)
-                self.cached_prediction = result
-                self.cached_prediction_at = time.monotonic()
-            return result, True
-        except Exception:
-            return tuple(map(float, actual)), False
+                import numpy as np
+                with self.lock:
+                    rows = self.store.read()
+                    if len(rows) < self.config.window_size:
+                        return tuple(map(float, actual)), False
+                    row = make_feature(rows, len(rows) - 1, self.config.window_size)
+                    matrix = np.asarray([row], dtype=float)
+                    result = tuple(float(self.models[p].predict(matrix)[0]) for p in PHASES)
+                return result, True
+            except Exception:
+                return tuple(map(float, actual)), False
+            finally:
+                self.served_generation = generation
+                self.serving_client_ticket += 1
+                self.source_condition.notify_all()
 
     def sample_counts(self) -> Tuple[int, int]:
         if not self.store:

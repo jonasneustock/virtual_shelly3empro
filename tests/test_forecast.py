@@ -2,6 +2,7 @@ import tempfile
 import unittest
 import json
 import os
+import threading
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -74,7 +75,7 @@ class ForecastTests(unittest.TestCase):
             self.assertEqual(manager.predict((1, 2, 3)), ((1.0, 2.0, 3.0), False))
             self.assertEqual(manager.status()["serving"], "fallback_actual")
 
-    def test_manager_caches_prediction_for_half_a_second(self):
+    def test_manager_waits_for_a_new_source_value_between_clients(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = ForecastConfig(history_path=str(Path(tmp) / "history.db"), model_dir=str(Path(tmp) / "model"))
             manager = ForecastManager(config, 2.0)
@@ -84,11 +85,17 @@ class ForecastTests(unittest.TestCase):
             model.predict.return_value = [42.0]
             manager.models = {phase: model for phase in ("a", "b", "c")}
 
-            with patch.object(manager, "reload"), patch("virtual_shelly.forecast.time.monotonic", side_effect=[1.0, 1.1, 1.4, 1.6, 1.7]):
+            with patch.object(manager, "reload"):
                 self.assertEqual(manager.predict((1, 2, 3)), ((42.0, 42.0, 42.0), True))
-                self.assertEqual(manager.predict((4, 5, 6)), ((42.0, 42.0, 42.0), True))
-                self.assertEqual(manager.predict((7, 8, 9)), ((42.0, 42.0, 42.0), True))
+                result = []
+                waiter = threading.Thread(target=lambda: result.append(manager.predict((4, 5, 6))))
+                waiter.start()
+                self.assertTrue(waiter.is_alive())
+                manager.record((10, 20, 30), ts=100.0)
+                waiter.join(timeout=1)
 
+            self.assertFalse(waiter.is_alive())
+            self.assertEqual(result, [((42.0, 42.0, 42.0), True)])
             self.assertEqual(model.predict.call_count, 6)
 
     def test_daily_scheduler_only_launches_once(self):
