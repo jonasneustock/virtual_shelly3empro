@@ -17,7 +17,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
 PHASES = ("a", "b", "c")
-DEFAULT_WINDOW_SIZE = 30
+DEFAULT_WINDOW_SIZE = 5
 # Kept as a compatibility alias for callers that used the old maximum lag.
 LAGS = tuple(range(1, DEFAULT_WINDOW_SIZE + 1))
 PREDICTION_CACHE_SECONDS = 0.5

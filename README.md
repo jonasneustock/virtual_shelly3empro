@@ -107,7 +107,7 @@ Configuration (env vars)
   - `FORECAST_MODEL_DIR`: promoted LightGBM models and metrics (default `/data/forecast_model`).
   - `FORECAST_TRAIN_HOUR`: local hour for daily child-process training (default `2`).
   - `FORECAST_MIN_SAMPLES`: minimum supervised samples required to train (default `1000`).
-  - `FORECAST_WINDOW_SIZE`: number of consecutive readings in the input vector used to make each prediction (default `30`). Changing it invalidates the active model and forces a cold retrain.
+  - `FORECAST_WINDOW_SIZE`: number of consecutive readings in the input vector used to make each prediction (default `5`). Changing it invalidates the active model and forces a cold retrain.
   - `FORECAST_VALIDATION_FRACTION`: newest chronological fraction used for validation (default `0.2`).
   - `FORECAST_HISTORY_DAYS`: observation retention period (default `30`).
   - `FORECAST_MAPE_FLOOR_WATTS`: denominator floor used by MAPE around zero (default `10`).

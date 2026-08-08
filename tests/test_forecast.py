@@ -15,7 +15,9 @@ from virtual_shelly.train_forecast import incumbent_is_compatible
 class ForecastTests(unittest.TestCase):
     def test_default_horizon_is_one_step(self):
         with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(ForecastConfig.from_env().horizon, 1)
+            config = ForecastConfig.from_env()
+            self.assertEqual(config.horizon, 1)
+            self.assertEqual(config.window_size, 5)
 
     def test_input_window_comes_from_environment(self):
         with patch.dict(os.environ, {"FORECAST_WINDOW_SIZE": "12"}, clear=True):
@@ -32,7 +34,7 @@ class ForecastTests(unittest.TestCase):
             output = Path(tmp)
             for phase in ("a", "b", "c"):
                 (output / f"{phase}.txt").touch()
-            metadata = {"horizon": 1, "window_size": 30, "features": feature_names(30)}
+            metadata = {"horizon": 1, "window_size": 5, "features": feature_names(5)}
             (output / "metadata.json").write_text(json.dumps(metadata))
             self.assertTrue(incumbent_is_compatible(output, ForecastConfig(horizon=1)))
             self.assertFalse(incumbent_is_compatible(output, ForecastConfig(horizon=2)))
