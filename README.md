@@ -54,7 +54,7 @@ Configuration (env vars)
   - `HA_TOKEN`: HA Long‑Lived Access Token (read‑only)
   - `POLL_INTERVAL`: seconds between polls (default 2.0)
   - `INPUT_SOURCE`: source for phase values. Supported: `home_assistant` (default) or `shelly_webapi`
-  - `HA_SMOOTHING_ENABLE`: when `true`, average each sensor reading over the last 5 values
+  - `HA_SMOOTHING_ENABLE`: average each sensor reading over the last 3 values (default `true`; set to `false` to disable)
   - Entity IDs (override as needed): `A_POWER`, `B_POWER`, `C_POWER`, `A_VOLT`, `B_VOLT`, `C_VOLT`, `A_CURR`, `B_CURR`, `C_CURR`, `A_PF`, `B_PF`, `C_PF`
   - Shelly upstream source (used when `INPUT_SOURCE=shelly_webapi`)
     - `SHELLY_BASE_URL`: base URL of one upstream Shelly (for example `http://192.168.1.120`)
@@ -77,9 +77,9 @@ Configuration (env vars)
   - `WS_NOTIFY_EPS`: coalescing threshold in watts; only broadcast when change ≥ EPS (default `0.1`).
   - `CORS_ENABLE`: enable CORS middleware (`true|false`, default `false`).
   - `CORS_ORIGINS`: comma‑separated allowed origins (default `*`).
-  - Request‑side scaling (divide power by active client IPs)
+  - Request‑side scaling (divide power among active client IPs minus one, so multiple batteries share the load without oscillating)
     - `REQUEST_SIDE_SCALING_ENABLE`: `true|false` (default `true`)
-    - `REQUEST_SIDE_SCALING_CLIENTS`: integer override for client count (default `0` = auto by active IPs)
+    - `REQUEST_SIDE_SCALING_CLIENTS`: integer override for asking-device count (default `0` = auto by active IPs); the divisor is this count minus one, with a minimum of one
   - Total power offsets
     - `POSITIVE_POWER_OFFSET`: watts subtracted when total power is positive (default `10.0`)
     - `NEGATIVE_POWER_OFFSET`: watts subtracted when total power is negative (default `10.0`)

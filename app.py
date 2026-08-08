@@ -46,8 +46,8 @@ from pydantic import BaseModel
 HA_BASE_URL = os.getenv("HA_BASE_URL", "http://homeassistant:8123")
 HA_TOKEN = os.getenv("HA_TOKEN", "")
 POLL_INTERVAL = float(os.getenv("POLL_INTERVAL", "2.0"))
-HA_SMOOTHING_ENABLE = os.getenv("HA_SMOOTHING_ENABLE", "false").lower() in ("1", "true", "yes")
-HA_SMOOTHING_WINDOW = 5
+HA_SMOOTHING_ENABLE = os.getenv("HA_SMOOTHING_ENABLE", "true").lower() in ("1", "true", "yes")
+HA_SMOOTHING_WINDOW = 3
 INPUT_SOURCE = os.getenv("INPUT_SOURCE", "home_assistant").strip().lower()
 
 SHELLY_BASE_URL = os.getenv("SHELLY_BASE_URL", "").strip().rstrip("/")
@@ -127,7 +127,7 @@ WS_NOTIFY_EPS = float(os.getenv("WS_NOTIFY_EPS", "0.1"))
 CORS_ENABLE = os.getenv("CORS_ENABLE", "false").lower() in ("1", "true", "yes")
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*")
 
-# Request-side scaling (divide power by number of active client IPs)
+# Request-side scaling (divide power among active client IPs, excluding one)
 REQUEST_SIDE_SCALING_ENABLE = os.getenv("REQUEST_SIDE_SCALING_ENABLE", "true").lower() in ("1", "true", "yes")
 try:
     REQUEST_SIDE_SCALING_CLIENTS = int(os.getenv("REQUEST_SIDE_SCALING_CLIENTS", "0"))  # 0 = auto count
@@ -361,10 +361,13 @@ def _apply_request_side_power_scaling(powers: Tuple[float, float, float]) -> Tup
     # Allow explicit override of active client count via env; 0 means auto
     override = int(REQUEST_SIDE_SCALING_CLIENTS or 0)
     count = override if override > 0 else _active_request_ip_count()
-    count = max(1, count)
-    if count <= 1:
+    # One active IP is the monitoring/controller device rather than a battery.
+    # Excluding it prevents each battery from reacting to the full load, which
+    # otherwise makes multi-battery systems oscillate.
+    divisor = max(1, count - 1)
+    if divisor <= 1:
         return powers
-    return tuple(p / count for p in powers)
+    return tuple(p / divisor for p in powers)
 
 def _smooth_value(entity_id: str, value: float) -> float:
     with _SMOOTHING_LOCK:
