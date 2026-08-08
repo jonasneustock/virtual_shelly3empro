@@ -18,6 +18,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 PHASES = ("a", "b", "c")
 LAGS = (1, 2, 3, 5, 10, 30)
+PREDICTION_CACHE_SECONDS = 0.5
 
 
 def _env_bool(name: str, default: str) -> bool:
@@ -125,6 +126,8 @@ class ForecastManager:
         self.metadata_mtime = 0.0
         self.process: Optional[subprocess.Popen] = None
         self.last_launch_date: Optional[str] = None
+        self.cached_prediction: Optional[Tuple[float, float, float]] = None
+        self.cached_prediction_at = 0.0
         self.reload()
 
     @property
@@ -151,6 +154,8 @@ class ForecastManager:
             with self.lock:
                 self.models, self.metadata = models, metadata
                 self.metadata_mtime = path.stat().st_mtime
+                self.cached_prediction = None
+                self.cached_prediction_at = 0.0
         except Exception:
             return
 
@@ -160,13 +165,18 @@ class ForecastManager:
             return tuple(map(float, actual)), False
         try:
             import numpy as np
-            rows = self.store.read()
-            if len(rows) <= max(LAGS):
-                return tuple(map(float, actual)), False
-            row = make_feature(rows, len(rows) - 1)
             with self.lock:
+                now = time.monotonic()
+                if self.cached_prediction is not None and now - self.cached_prediction_at < PREDICTION_CACHE_SECONDS:
+                    return self.cached_prediction, True
+                rows = self.store.read()
+                if len(rows) <= max(LAGS):
+                    return tuple(map(float, actual)), False
+                row = make_feature(rows, len(rows) - 1)
                 matrix = np.asarray([row], dtype=float)
                 result = tuple(float(self.models[p].predict(matrix)[0]) for p in PHASES)
+                self.cached_prediction = result
+                self.cached_prediction_at = time.monotonic()
             return result, True
         except Exception:
             return tuple(map(float, actual)), False

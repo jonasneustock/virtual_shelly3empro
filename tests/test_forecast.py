@@ -49,6 +49,23 @@ class ForecastTests(unittest.TestCase):
             self.assertEqual(manager.predict((1, 2, 3)), ((1.0, 2.0, 3.0), False))
             self.assertEqual(manager.status()["serving"], "fallback_actual")
 
+    def test_manager_caches_prediction_for_half_a_second(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = ForecastConfig(history_path=str(Path(tmp) / "history.db"), model_dir=str(Path(tmp) / "model"))
+            manager = ForecastManager(config, 2.0)
+            for i in range(max(LAGS) + 1):
+                manager.store.append(float(i), (i, i * 2, i * 3))
+            model = unittest.mock.Mock()
+            model.predict.return_value = [42.0]
+            manager.models = {phase: model for phase in ("a", "b", "c")}
+
+            with patch.object(manager, "reload"), patch("virtual_shelly.forecast.time.monotonic", side_effect=[1.0, 1.1, 1.4, 1.6, 1.7]):
+                self.assertEqual(manager.predict((1, 2, 3)), ((42.0, 42.0, 42.0), True))
+                self.assertEqual(manager.predict((4, 5, 6)), ((42.0, 42.0, 42.0), True))
+                self.assertEqual(manager.predict((7, 8, 9)), ((42.0, 42.0, 42.0), True))
+
+            self.assertEqual(model.predict.call_count, 6)
+
     def test_daily_scheduler_only_launches_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = ForecastConfig(history_path=str(Path(tmp) / "history.db"), model_dir=str(Path(tmp) / "model"), train_hour=2)
