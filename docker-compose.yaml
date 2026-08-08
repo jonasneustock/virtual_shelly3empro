@@ -14,6 +14,8 @@ services:
       FORECAST_HORIZON_STEPS: "1"
       FORECAST_TRAIN_HOUR: "2"
       FORECAST_MIN_SAMPLES: "1000"
+      # Number of consecutive readings in each forecast input vector.
+      FORECAST_WINDOW_SIZE: "5"
       # Total power correction in watts, selected by the raw total's sign.
       POSITIVE_POWER_OFFSET: "10.0"
       NEGATIVE_POWER_OFFSET: "10.0"

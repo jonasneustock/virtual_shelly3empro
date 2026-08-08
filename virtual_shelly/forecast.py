@@ -17,7 +17,9 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
 PHASES = ("a", "b", "c")
-LAGS = (1, 2, 3, 5, 10, 30)
+DEFAULT_WINDOW_SIZE = 5
+# Kept as a compatibility alias for callers that used the old maximum lag.
+LAGS = tuple(range(1, DEFAULT_WINDOW_SIZE + 1))
 PREDICTION_CACHE_SECONDS = 0.5
 
 
@@ -33,6 +35,7 @@ class ForecastConfig:
     model_dir: str = "/data/forecast_model"
     train_hour: int = 2
     min_samples: int = 1000
+    window_size: int = DEFAULT_WINDOW_SIZE
     validation_fraction: float = 0.2
     retention_days: int = 30
     mape_floor_watts: float = 10.0
@@ -46,6 +49,7 @@ class ForecastConfig:
             model_dir=os.getenv("FORECAST_MODEL_DIR", "/data/forecast_model"),
             train_hour=min(23, max(0, int(os.getenv("FORECAST_TRAIN_HOUR", "2")))),
             min_samples=max(100, int(os.getenv("FORECAST_MIN_SAMPLES", "1000"))),
+            window_size=max(1, int(os.getenv("FORECAST_WINDOW_SIZE", str(DEFAULT_WINDOW_SIZE)))),
             validation_fraction=min(.4, max(.05, float(os.getenv("FORECAST_VALIDATION_FRACTION", ".2")))),
             retention_days=max(1, int(os.getenv("FORECAST_HISTORY_DAYS", "30"))),
             mape_floor_watts=max(.001, float(os.getenv("FORECAST_MAPE_FLOOR_WATTS", "10"))),
@@ -72,42 +76,44 @@ class HistoryStore:
         with self._connect() as db:
             db.execute("INSERT OR REPLACE INTO power VALUES (?, ?, ?, ?)", (ts, *map(float, powers)))
 
-    def read(self) -> List[Tuple[float, float, float, float]]:
+    def read(self, cutoff: Optional[float] = None) -> List[Tuple[float, float, float, float]]:
         with self._connect() as db:
-            return list(db.execute("SELECT ts,a,b,c FROM power ORDER BY ts"))
+            if cutoff is None:
+                return list(db.execute("SELECT ts,a,b,c FROM power ORDER BY ts"))
+            return list(db.execute("SELECT ts,a,b,c FROM power WHERE ts >= ? ORDER BY ts", (cutoff,)))
 
     def prune(self, cutoff: float) -> None:
         with self._connect() as db:
             db.execute("DELETE FROM power WHERE ts < ?", (cutoff,))
 
 
-def feature_names() -> List[str]:
+def feature_names(window_size: int = DEFAULT_WINDOW_SIZE) -> List[str]:
     names = ["hour_sin", "hour_cos", "week_sin", "week_cos"]
     for phase in PHASES:
-        names.extend(f"{phase}_lag_{lag}" for lag in LAGS)
-        names.extend((f"{phase}_mean_5", f"{phase}_mean_30", f"{phase}_delta"))
+        names.extend(f"{phase}_lag_{lag}" for lag in range(window_size))
     return names
 
 
-def make_feature(rows: Sequence[Sequence[float]], index: int) -> List[float]:
+def make_feature(
+    rows: Sequence[Sequence[float]], index: int, window_size: int = DEFAULT_WINDOW_SIZE
+) -> List[float]:
     ts = float(rows[index][0])
     dt = datetime.fromtimestamp(ts)
     hour_angle = 2 * math.pi * (dt.hour * 3600 + dt.minute * 60 + dt.second) / 86400
     week_angle = 2 * math.pi * dt.weekday() / 7
     values = [math.sin(hour_angle), math.cos(hour_angle), math.sin(week_angle), math.cos(week_angle)]
     for column in range(1, 4):
-        values.extend(float(rows[index - lag][column]) for lag in LAGS)
-        values.append(sum(float(rows[j][column]) for j in range(index - 4, index + 1)) / 5)
-        values.append(sum(float(rows[j][column]) for j in range(index - 29, index + 1)) / 30)
-        values.append(float(rows[index][column]) - float(rows[index - 1][column]))
+        values.extend(float(rows[index - lag][column]) for lag in range(window_size))
     return values
 
 
-def supervised(rows: Sequence[Sequence[float]], horizon: int) -> Tuple[List[List[float]], Dict[str, List[float]]]:
+def supervised(
+    rows: Sequence[Sequence[float]], horizon: int, window_size: int = DEFAULT_WINDOW_SIZE
+) -> Tuple[List[List[float]], Dict[str, List[float]]]:
     features: List[List[float]] = []
     targets = {phase: [] for phase in PHASES}
-    for i in range(max(LAGS), len(rows) - horizon):
-        features.append(make_feature(rows, i))
+    for i in range(window_size - 1, len(rows) - horizon):
+        features.append(make_feature(rows, i, window_size))
         for column, phase in enumerate(PHASES, 1):
             targets[phase].append(float(rows[i + horizon][column]))
     return features, targets
@@ -148,7 +154,12 @@ class ForecastManager:
         try:
             import lightgbm as lgb
             metadata = json.loads(path.read_text())
-            if metadata.get("horizon") != self.config.horizon or metadata.get("features") != feature_names():
+            if (
+                metadata.get("horizon") != self.config.horizon
+                or metadata.get("window_size") != self.config.window_size
+                or metadata.get("features") != feature_names(self.config.window_size)
+                or metadata.get("validation_mape", float("inf")) >= 10.0
+            ):
                 return
             models = {p: lgb.Booster(model_file=str(Path(self.config.model_dir) / f"{p}.txt")) for p in PHASES}
             with self.lock:
@@ -170,9 +181,9 @@ class ForecastManager:
                 if self.cached_prediction is not None and now - self.cached_prediction_at < PREDICTION_CACHE_SECONDS:
                     return self.cached_prediction, True
                 rows = self.store.read()
-                if len(rows) <= max(LAGS):
+                if len(rows) < self.config.window_size:
                     return tuple(map(float, actual)), False
-                row = make_feature(rows, len(rows) - 1)
+                row = make_feature(rows, len(rows) - 1, self.config.window_size)
                 matrix = np.asarray([row], dtype=float)
                 result = tuple(float(self.models[p].predict(matrix)[0]) for p in PHASES)
                 self.cached_prediction = result
@@ -185,7 +196,8 @@ class ForecastManager:
         if not self.store:
             return 0, 0
         try:
-            total = len(supervised(self.store.read(), self.config.horizon)[0])
+            cutoff = time.time() - self.config.retention_days * 86400
+            total = len(supervised(self.store.read(cutoff), self.config.horizon, self.config.window_size)[0])
         except Exception:
             return 0, 0
         if total < 2:
@@ -217,6 +229,7 @@ class ForecastManager:
             "serving": "forecast" if self.models else "fallback_actual",
             "horizon_steps": self.config.horizon,
             "horizon_seconds": self.config.horizon * self.poll_interval,
+            "window_size": self.config.window_size,
             "validation_mape": self.metadata.get("validation_mape"),
             "phase_mape": self.metadata.get("phase_mape", {}),
             "training_samples": training_samples,

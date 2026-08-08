@@ -107,10 +107,11 @@ Configuration (env vars)
   - `FORECAST_MODEL_DIR`: promoted LightGBM models and metrics (default `/data/forecast_model`).
   - `FORECAST_TRAIN_HOUR`: local hour for daily child-process training (default `2`).
   - `FORECAST_MIN_SAMPLES`: minimum supervised samples required to train (default `1000`).
+  - `FORECAST_WINDOW_SIZE`: number of consecutive readings in the input vector used to make each prediction (default `5`). Changing it invalidates the active model and forces a cold retrain.
   - `FORECAST_VALIDATION_FRACTION`: newest chronological fraction used for validation (default `0.2`).
   - `FORECAST_HISTORY_DAYS`: observation retention period (default `30`).
   - `FORECAST_MAPE_FLOOR_WATTS`: denominator floor used by MAPE around zero (default `10`).
-  - Daily training warm-starts each phase model from the active LightGBM booster. A candidate is atomically promoted only when its mean phase validation MAPE beats the incumbent on the same validation slice.
+  - Training uses all observations retained by `FORECAST_HISTORY_DAYS` (30 days by default). Daily training warm-starts each phase model from the active LightGBM booster. A candidate is atomically promoted only when its mean phase validation MAPE is under 10% and beats the incumbent on the same validation slice. Until a qualifying model exists for the configured horizon and input window, current readings are returned as the fallback.
 
 APIs
 

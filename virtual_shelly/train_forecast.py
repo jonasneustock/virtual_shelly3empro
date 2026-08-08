@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -20,7 +21,8 @@ def incumbent_is_compatible(output: Path, config: ForecastConfig) -> bool:
         return False
     return (
         metadata.get("horizon") == config.horizon
-        and metadata.get("features") == feature_names()
+        and metadata.get("window_size") == config.window_size
+        and metadata.get("features") == feature_names(config.window_size)
         and all((output / f"{phase}.txt").is_file() for phase in PHASES)
     )
 
@@ -30,8 +32,9 @@ def train() -> bool:
     import numpy as np
 
     config = ForecastConfig.from_env()
-    rows = HistoryStore(config.history_path).read()
-    x, targets = supervised(rows, config.horizon)
+    cutoff = time.time() - config.retention_days * 86400
+    rows = HistoryStore(config.history_path).read(cutoff)
+    x, targets = supervised(rows, config.horizon, config.window_size)
     if len(x) < config.min_samples:
         return False
     split = max(1, min(len(x) - 1, int(len(x) * (1 - config.validation_fraction))))
@@ -46,10 +49,10 @@ def train() -> bool:
     params = {"objective": "regression_l1", "metric": "l1", "learning_rate": .05, "num_leaves": 31, "verbosity": -1, "seed": 42}
     for phase in PHASES:
         old_path = output / f"{phase}.txt"
-        # A horizon change changes every target. Do a full cold retrain rather
-        # than extending or comparing models trained for another N+X window.
+        # A horizon or input-window change changes the training problem. Do a
+        # full cold retrain rather than extending an incompatible model.
         old = lgb.Booster(model_file=str(old_path)) if warm_start else None
-        train_set = lgb.Dataset(x_train, label=targets[phase][:split], feature_name=feature_names())
+        train_set = lgb.Dataset(x_train, label=targets[phase][:split], feature_name=feature_names(config.window_size))
         valid_set = lgb.Dataset(x_valid, label=targets[phase][split:], reference=train_set)
         candidates[phase] = lgb.train(params, train_set, num_boost_round=300, valid_sets=[valid_set],
                                       callbacks=[lgb.early_stopping(30, verbose=False)], init_model=old)
@@ -58,6 +61,10 @@ def train() -> bool:
             incumbent_scores[phase] = mape(targets[phase][split:], old.predict(x_valid), config.mape_floor_watts)
     candidate_score = sum(scores.values()) / len(scores)
     incumbent_score = sum(incumbent_scores.values()) / len(incumbent_scores) if len(incumbent_scores) == 3 else None
+    # Never serve a forecast that misses the requested quality bar. The
+    # manager continues returning current readings until a later run succeeds.
+    if candidate_score >= 10.0:
+        return False
     if incumbent_score is not None and candidate_score >= incumbent_score:
         return False
     with tempfile.TemporaryDirectory(dir=str(output.parent)) as tmp:
@@ -65,7 +72,8 @@ def train() -> bool:
         for phase, model in candidates.items():
             model.save_model(str(tmp_path / f"{phase}.txt"))
         metadata = {
-            "horizon": config.horizon, "features": feature_names(), "validation_mape": candidate_score,
+            "horizon": config.horizon, "window_size": config.window_size,
+            "features": feature_names(config.window_size), "validation_mape": candidate_score,
             "phase_mape": scores, "validation_samples": len(x_valid),
             "trained_at": datetime.now(timezone.utc).isoformat(),
         }
