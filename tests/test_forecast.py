@@ -3,6 +3,7 @@ import unittest
 import json
 import os
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -23,6 +24,10 @@ class ForecastTests(unittest.TestCase):
     def test_input_window_comes_from_environment(self):
         with patch.dict(os.environ, {"FORECAST_WINDOW_SIZE": "12"}, clear=True):
             self.assertEqual(ForecastConfig.from_env().window_size, 12)
+
+    def test_serve_interval_comes_from_environment(self):
+        with patch.dict(os.environ, {"FORECAST_SERVE_INTERVAL": "0.4"}, clear=True):
+            self.assertEqual(ForecastConfig.from_env().serve_interval, 0.4)
 
     def test_input_vector_contains_configured_number_of_readings(self):
         rows = [(float(i), float(i), float(i * 2), float(i * 3)) for i in range(12)]
@@ -87,9 +92,13 @@ class ForecastTests(unittest.TestCase):
             self.assertEqual(manager.predict((1, 2, 3)), ((1.0, 2.0, 3.0), False))
             self.assertEqual(manager.status()["serving"], "fallback_actual")
 
-    def test_manager_waits_for_a_new_source_value_between_clients(self):
+    def test_manager_serves_clients_in_turn_without_waiting_for_new_data(self):
         with tempfile.TemporaryDirectory() as tmp:
-            config = ForecastConfig(history_path=str(Path(tmp) / "history.db"), model_dir=str(Path(tmp) / "model"))
+            config = ForecastConfig(
+                history_path=str(Path(tmp) / "history.db"),
+                model_dir=str(Path(tmp) / "model"),
+                serve_interval=0.05,
+            )
             manager = ForecastManager(config, 2.0)
             for i in range(max(LAGS) + 1):
                 manager.store.append(float(i), (i, i * 2, i * 3))
@@ -102,8 +111,8 @@ class ForecastTests(unittest.TestCase):
                 result = []
                 waiter = threading.Thread(target=lambda: result.append(manager.predict((4, 5, 6))))
                 waiter.start()
+                time.sleep(0.01)
                 self.assertTrue(waiter.is_alive())
-                manager.record((10, 20, 30), ts=100.0)
                 waiter.join(timeout=1)
 
             self.assertFalse(waiter.is_alive())

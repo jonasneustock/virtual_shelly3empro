@@ -39,6 +39,7 @@ class ForecastConfig:
     validation_fraction: float = 0.2
     retention_days: int = 30
     mape_floor_watts: float = 10.0
+    serve_interval: float = 0.25
 
     @classmethod
     def from_env(cls) -> "ForecastConfig":
@@ -53,6 +54,7 @@ class ForecastConfig:
             validation_fraction=min(.4, max(.05, float(os.getenv("FORECAST_VALIDATION_FRACTION", ".2")))),
             retention_days=max(1, int(os.getenv("FORECAST_HISTORY_DAYS", "30"))),
             mape_floor_watts=max(.001, float(os.getenv("FORECAST_MAPE_FLOOR_WATTS", "10"))),
+            serve_interval=max(0.0, float(os.getenv("FORECAST_SERVE_INTERVAL", ".25"))),
         )
 
 
@@ -172,13 +174,13 @@ class ForecastManager:
         self.metadata_mtime = 0.0
         self.process: Optional[subprocess.Popen] = None
         self.last_launch_date: Optional[str] = None
-        # A source sample may only satisfy one caller.  Serialising callers here
-        # prevents several batteries from reacting to the same rise or fall.
-        self.source_condition = threading.Condition()
-        self.source_generation = 0
-        self.served_generation = -1
+        # Serialize consumers without making them wait for another source poll.
+        # A short gap keeps multiple batteries from reacting at exactly the same
+        # instant while ensuring every request receives the latest known value.
+        self.serve_condition = threading.Condition()
         self.next_client_ticket = 0
         self.serving_client_ticket = 0
+        self.last_served_mono: Optional[float] = None
         self.reload()
 
     @property
@@ -194,9 +196,6 @@ class ForecastManager:
             powers,
             prune_before=now - self.config.retention_days * 86400,
         )
-        with self.source_condition:
-            self.source_generation += 1
-            self.source_condition.notify_all()
 
     def reload(self) -> None:
         path = self.metadata_path
@@ -223,15 +222,16 @@ class ForecastManager:
         if not self.store:
             return tuple(map(float, actual)), False
 
-        # Keep the condition held through inference and generation bookkeeping:
-        # one newly recorded source value is consequently handed to one waiting
-        # client, and the following client waits for the next poll.
-        with self.source_condition:
+        # Keep the condition held through inference and bookkeeping so callers
+        # are served in arrival order, separated by the configured short gap.
+        with self.serve_condition:
             ticket = self.next_client_ticket
             self.next_client_ticket += 1
-            while ticket != self.serving_client_ticket or self.source_generation <= self.served_generation:
-                self.source_condition.wait()
-            generation = self.source_generation
+            while ticket != self.serving_client_ticket:
+                self.serve_condition.wait()
+            if self.last_served_mono is not None:
+                while (remaining := self.config.serve_interval - (time.monotonic() - self.last_served_mono)) > 0:
+                    self.serve_condition.wait(timeout=remaining)
             self.reload()
             try:
                 if not self.models:
@@ -248,9 +248,9 @@ class ForecastManager:
             except Exception:
                 return tuple(map(float, actual)), False
             finally:
-                self.served_generation = generation
+                self.last_served_mono = time.monotonic()
                 self.serving_client_ticket += 1
-                self.source_condition.notify_all()
+                self.serve_condition.notify_all()
 
     def sample_counts(self) -> Tuple[int, int]:
         if not self.store:

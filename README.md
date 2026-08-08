@@ -112,6 +112,7 @@ Configuration (env vars)
   - `FORECAST_VALIDATION_FRACTION`: newest chronological fraction used for validation (default `0.2`).
   - `FORECAST_HISTORY_DAYS`: observation retention period (default `30`).
   - `FORECAST_MAPE_FLOOR_WATTS`: denominator floor used by MAPE around zero (default `10`).
+  - `FORECAST_SERVE_INTERVAL`: seconds between serving consecutive power consumers (default `0.25`). Requests are served in arrival order using the latest available reading instead of waiting for a new source poll.
   - Training uses all observations retained by `FORECAST_HISTORY_DAYS` (30 days by default). Daily training warm-starts each phase model from the active LightGBM booster. A candidate is atomically promoted only when its mean phase validation MAPE is under 10% and beats the incumbent on the same validation slice. Until a qualifying model exists for the configured horizon and input window, current readings are returned as the fallback.
 
 APIs
@@ -148,7 +149,7 @@ Example Commands
 Home Assistant polling
 
 - Each `POLL_INTERVAL`, HA sensors are fetched. Missing or `unknown/unavailable` values are treated as `None` (or `0.0` for power). Phase power values feed energy integration (kWh) over time.
-- Power results are not cached across clients. After one client receives the current result, another request waits for a fresh source poll, so multiple batteries are served in round-robin order rather than reacting simultaneously to the same change.
+- Power consumers are served one at a time, in arrival order, with `FORECAST_SERVE_INTERVAL` between them. Each consumer receives the latest available result immediately after that short delay; requests do not wait for a fresh source poll.
 - Energy counters persist to `STATE_PATH`. You can reset counters via RPC: `EMData.ResetCounters`.
 
 Shelly Web API polling
